@@ -8,8 +8,19 @@ extension TrustedRouter {
     
     // ---- catalog / metadata ---------------------------------------------
     
-    public func models() async throws -> DataList<ModelInfo> {
-        return try await request(method: "GET", path: "/models")
+    public func models(
+        openWeights: Bool? = nil,
+        providerJurisdiction: String? = nil,
+        providerRegion: String? = nil
+    ) async throws -> DataList<ModelInfo> {
+        return try await request(
+            method: "GET",
+            path: modelsPath(
+                openWeights: openWeights,
+                providerJurisdiction: providerJurisdiction,
+                providerRegion: providerRegion
+            )
+        )
     }
     
     public func providers() async throws -> DataList<ProviderInfo> {
@@ -531,4 +542,27 @@ extension TrustedRouter {
             usage: nil
         )
     }
+}
+
+private func modelsPath(
+    openWeights: Bool?,
+    providerJurisdiction: String?,
+    providerRegion: String?
+) -> String {
+    var queryItems: [URLQueryItem] = []
+    if let openWeights = openWeights {
+        queryItems.append(URLQueryItem(name: "open_weights", value: openWeights ? "true" : "false"))
+    }
+    if let providerJurisdiction = providerJurisdiction {
+        queryItems.append(URLQueryItem(name: "provider[jurisdiction]", value: providerJurisdiction))
+    }
+    if let providerRegion = providerRegion {
+        queryItems.append(URLQueryItem(name: "provider[region]", value: providerRegion))
+    }
+    var components = URLComponents()
+    components.queryItems = queryItems.isEmpty ? nil : queryItems
+    guard let query = components.query, !query.isEmpty else {
+        return "/models"
+    }
+    return "/models?\(query)"
 }

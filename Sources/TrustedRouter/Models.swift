@@ -13,10 +13,31 @@ public struct ModelInfo: Codable, Sendable {
     public var object: String?
     public var created: Int?
     public var ownedBy: String?
+    public var name: String?
+    public var description: String?
+    public var contextLength: Int?
+    public var trustedrouter: ModelTrustedRouterMetadata?
+
+    public var openWeights: Bool { trustedrouter?.openWeights ?? false }
+    public var usProviderAvailable: Bool { trustedrouter?.usProviderAvailable ?? false }
+    public var euFocusedProviderAvailable: Bool { trustedrouter?.euFocusedProviderAvailable ?? false }
     
     enum CodingKeys: String, CodingKey {
-        case id, object, created
+        case id, object, created, name, description, trustedrouter
         case ownedBy = "owned_by"
+        case contextLength = "context_length"
+    }
+}
+
+public struct ModelTrustedRouterMetadata: Codable, Sendable {
+    public var openWeights: Bool?
+    public var usProviderAvailable: Bool?
+    public var euFocusedProviderAvailable: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case openWeights = "open_weights"
+        case usProviderAvailable = "us_provider_available"
+        case euFocusedProviderAvailable = "eu_focused_provider_available"
     }
 }
 

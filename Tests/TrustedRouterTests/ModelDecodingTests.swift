@@ -8,11 +8,32 @@ final class ModelDecodingTests: XCTestCase {
 
     func testModelInfoSnakeCaseOwnedBy() throws {
         let json = #"""
-        {"id": "gpt-4o", "object": "model", "created": 1700000000, "owned_by": "openai"}
+        {"id": "gpt-4o", "object": "model", "created": 1700000000, "owned_by": "openai", "context_length": 1048576}
         """#
         let m = try JSONDecoder().decode(ModelInfo.self, from: Data(json.utf8))
         XCTAssertEqual(m.id, "gpt-4o")
         XCTAssertEqual(m.ownedBy, "openai")
+        XCTAssertEqual(m.contextLength, 1048576)
+        XCTAssertFalse(m.openWeights)
+        XCTAssertFalse(m.usProviderAvailable)
+        XCTAssertFalse(m.euFocusedProviderAvailable)
+    }
+
+    func testModelInfoTrustedRouterBadges() throws {
+        let json = #"""
+        {
+          "id": "trustedrouter/prometheus-1.0",
+          "trustedrouter": {
+            "open_weights": true,
+            "us_provider_available": true,
+            "eu_focused_provider_available": true
+          }
+        }
+        """#
+        let m = try JSONDecoder().decode(ModelInfo.self, from: Data(json.utf8))
+        XCTAssertTrue(m.openWeights)
+        XCTAssertTrue(m.usProviderAvailable)
+        XCTAssertTrue(m.euFocusedProviderAvailable)
     }
 
     func testDataListGeneric() throws {

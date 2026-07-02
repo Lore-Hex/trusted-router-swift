@@ -106,6 +106,30 @@ final class TrustedRouterEndpointTests: XCTestCase {
         XCTAssertEqual(response.data.count, 1)
         XCTAssertEqual(response.data.first?.id, "model-1")
     }
+
+    func testModelsEndpointAcceptsCatalogFilters() async throws {
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(
+                request.url?.absoluteString,
+                "https://test.local/v1/models?open_weights=true&provider%5Bjurisdiction%5D=us&provider%5Bregion%5D=eu"
+            )
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            let json = """
+            {"data": [{"id": "trustedrouter/prometheus-1.0", "trustedrouter": {"open_weights": true, "us_provider_available": true, "eu_focused_provider_available": true}}]}
+            """.data(using: .utf8)!
+            return (response, json)
+        }
+
+        let response = try await router.models(
+            openWeights: true,
+            providerJurisdiction: "us",
+            providerRegion: "eu"
+        )
+        XCTAssertEqual(response.data.count, 1)
+        XCTAssertTrue(response.data.first?.openWeights ?? false)
+        XCTAssertTrue(response.data.first?.usProviderAvailable ?? false)
+        XCTAssertTrue(response.data.first?.euFocusedProviderAvailable ?? false)
+    }
     
     func testProvidersEndpoint() async throws {
         MockURLProtocol.requestHandler = { request in
