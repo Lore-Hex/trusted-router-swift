@@ -84,7 +84,8 @@ final class TrustedRouterEndpointTests: XCTestCase {
 
         router = try TrustedRouter(options: TrustedRouterOptions(
             apiKey: "test_key",
-            baseUrl: "https://test.local/v1",
+            baseUrl: "https://inference.test/v1",
+            controlBaseURL: "https://control.test/v1",
             urlSession: session,
             workspaceId: "test_workspace"
         ))
@@ -94,7 +95,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
 
     func testModelsEndpoint() async throws {
         MockURLProtocol.requestHandler = { request in
-            XCTAssertEqual(request.url?.absoluteString, "https://test.local/v1/models")
+            XCTAssertEqual(request.url?.absoluteString, "https://control.test/v1/models")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             let json = """
             {"data": [{"id": "model-1", "owned_by": "quill"}]}
@@ -111,7 +112,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(
                 request.url?.absoluteString,
-                "https://test.local/v1/models?open_weights=true&provider%5Bjurisdiction%5D=us&provider%5Bregion%5D=eu"
+                "https://control.test/v1/models?open_weights=true&provider%5Bjurisdiction%5D=us&provider%5Bregion%5D=eu"
             )
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             let json = """
@@ -133,6 +134,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
     
     func testProvidersEndpoint() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "control.test")
             XCTAssertEqual(request.url?.path, "/v1/providers")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             return (response, "{\"data\": [{\"id\": \"openai\"}]}".data(using: .utf8)!)
@@ -143,6 +145,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
 
     func testCreditsEndpoint() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "control.test")
             XCTAssertEqual(request.url?.path, "/v1/credits")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             return (response, "{\"balance\": 10.5, \"currency\": \"USD\"}".data(using: .utf8)!)
@@ -156,6 +159,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
 
     func testChatCompletions() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "inference.test")
             XCTAssertEqual(request.url?.path, "/v1/chat/completions")
             
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/event-stream"])!
@@ -170,6 +174,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
 
     func testEmbeddings() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "inference.test")
             XCTAssertEqual(request.url?.path, "/v1/embeddings")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             let json = "{\"object\": \"list\", \"data\": [{\"index\": 0, \"embedding\": [0.1, 0.2]}], \"model\": \"text-emb\"}"
@@ -180,10 +185,27 @@ final class TrustedRouterEndpointTests: XCTestCase {
         XCTAssertEqual(res.data.first?.embedding, [0.1, 0.2])
     }
 
+    func testMessagesUsesInferenceHost() async throws {
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "inference.test")
+            XCTAssertEqual(request.url?.path, "/v1/messages")
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            let json = """
+            {"id":"msg-1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-test","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}
+            """
+            return (response, json.data(using: .utf8)!)
+        }
+
+        let res = try await router.messages(model: "claude-test", messages: [["role": "user", "content": "hi"]])
+        XCTAssertEqual(res.id, "msg-1")
+        XCTAssertEqual(res.model, "claude-test")
+    }
+
     // MARK: - Broadcast Destinations
 
     func testGetBroadcastDestinations() async throws {
         MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "control.test")
             XCTAssertEqual(request.url?.path, "/v1/broadcast/destinations")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
             return (response, "{\"data\": [{\"id\": \"dest-1\", \"type\": \"webhook\"}]}".data(using: .utf8)!)

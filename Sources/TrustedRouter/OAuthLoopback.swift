@@ -57,7 +57,7 @@ public actor OAuthLoopback {
     private var state: String?
 
     public init(
-        baseURL: String = TrustedRouterConstants.defaultAPIBaseURL,
+        baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
         urlSession: URLSession = .shared,
         keyLabel: String? = nil,
         limit: String? = nil,

@@ -1,5 +1,10 @@
+import Foundation
 import XCTest
 @testable import TrustedRouter
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 #if canImport(AuthenticationServices)
 import AuthenticationServices
@@ -62,7 +67,7 @@ final class OAuthTests: XCTestCase {
 
     func testAuthorizeURLParamsAndStateEmbedding() throws {
         let url = try oauthAuthorizeURL(
-            baseURL: "https://api.quillrouter.com/v1",
+            baseURL: "https://trustedrouter.com/v1",
             callbackURL: "lore://oauth-callback",
             codeChallenge: "CHALLENGE",
             codeChallengeMethod: "S256",
@@ -74,7 +79,7 @@ final class OAuthTests: XCTestCase {
         )
 
         XCTAssertEqual(url.scheme, "https")
-        XCTAssertEqual(url.host, "api.quillrouter.com")
+        XCTAssertEqual(url.host, "trustedrouter.com")
         XCTAssertEqual(url.path, "/v1/auth")
 
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems ?? []
@@ -103,6 +108,8 @@ final class OAuthTests: XCTestCase {
 
     func testAuthorizeURLOmitsUnsetParams() throws {
         let url = try oauthAuthorizeURL(callbackURL: "lore://cb")
+        XCTAssertEqual(url.host, "trustedrouter.com")
+        XCTAssertEqual(url.path, "/v1/auth")
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems ?? []
         let names = Set(items.map(\.name))
         XCTAssertEqual(names, ["callback_url"])
@@ -127,8 +134,32 @@ final class OAuthTests: XCTestCase {
     }
 
     func testAuthorizeURLTrimsTrailingSlashOnBase() throws {
-        let url = try oauthAuthorizeURL(baseURL: "https://api.quillrouter.com/v1///", callbackURL: "lore://cb")
+        let url = try oauthAuthorizeURL(baseURL: "https://trustedrouter.com/v1///", callbackURL: "lore://cb")
         XCTAssertEqual(url.path, "/v1/auth")
+    }
+
+    func testExchangeOAuthKeyUsesControlHost() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.url?.host, "control.test")
+            XCTAssertEqual(request.url?.path, "/v1/auth/keys")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
+            return (response, #"{"key":"sk-tr-v1-test","user_id":"usr_1"}"#.data(using: .utf8)!)
+        }
+
+        let token = try await exchangeOAuthKey(
+            code: "AUTHCODE",
+            codeVerifier: "VERIFIER",
+            codeChallengeMethod: "S256",
+            baseURL: "https://control.test/v1",
+            urlSession: session
+        )
+        XCTAssertEqual(token.key, "sk-tr-v1-test")
+        XCTAssertEqual(token.userId, "usr_1")
     }
 
     // MARK: - Token / userinfo decoding

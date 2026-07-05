@@ -4,6 +4,17 @@ All notable changes to this SDK are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+- Default inference base URL is now `https://api.trustedrouter.com/v1`.
+- Added `TrustedRouterConstants.defaultControlBaseURL` and the
+  `TrustedRouterOptions.controlBaseURL` override for control-plane routes.
+- Routed catalog, provider/region, credits, activity, auth/OAuth, billing,
+  and broadcast-destination calls to the control plane while keeping chat,
+  messages, responses, embeddings, input-token estimation, and attestation on
+  the inference plane.
+
 ## 0.4.0 — 2026-05-10
 
 ### Added

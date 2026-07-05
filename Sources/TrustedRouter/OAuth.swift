@@ -294,8 +294,8 @@ public struct UserInfoResponse: Codable, Sendable, Equatable {
 /// as its own top-level param. Only parameters that are set are included.
 ///
 /// - Parameters:
-///   - baseURL: API base, defaulting to the SDK default. Trailing slashes are
-///     trimmed before joining `"/auth"`.
+///   - baseURL: control/website base, defaulting to the SDK control default.
+///     Trailing slashes are trimmed before joining `"/auth"`.
 ///   - callbackURL: REQUIRED redirect target. After approval the backend
 ///     redirects to `callbackURL?code=...&user_id=...` (plus the embedded
 ///     `state`).
@@ -305,7 +305,7 @@ public struct UserInfoResponse: Codable, Sendable, Equatable {
 /// - Throws: `TrustedRouterError.internalError` if `callbackURL` is missing/
 ///   invalid, or if a method is given without a challenge.
 public func oauthAuthorizeURL(
-    baseURL: String = TrustedRouterConstants.defaultAPIBaseURL,
+    baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
     callbackURL: String,
     codeChallenge: String? = nil,
     codeChallengeMethod: String? = nil,
@@ -381,7 +381,7 @@ public func exchangeOAuthKey(
     code: String,
     codeVerifier: String? = nil,
     codeChallengeMethod: String? = nil,
-    baseURL: String = TrustedRouterConstants.defaultAPIBaseURL,
+    baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
     urlSession: URLSession = .shared
 ) async throws -> OAuthToken {
     if code.isEmpty {
@@ -389,11 +389,11 @@ public func exchangeOAuthKey(
     }
     // Public-client exchange: an empty apiKey suppresses the Authorization
     // header in the client's header builder.
-    let client = try TrustedRouter(options: .init(apiKey: "", baseUrl: baseURL, urlSession: urlSession))
+    let client = try TrustedRouter(options: .init(apiKey: "", controlBaseURL: baseURL, urlSession: urlSession))
     var body: [String: Any] = ["code": code]
     if let codeVerifier { body["code_verifier"] = codeVerifier }
     if let codeChallengeMethod { body["code_challenge_method"] = codeChallengeMethod }
-    return try await client.request(method: "POST", path: "/auth/keys", body: body)
+    return try await client.request(method: "POST", path: "/auth/keys", body: body, plane: .control)
 }
 
 /// Fetch the verified identity for `apiKey` (a delegated key).
@@ -402,14 +402,14 @@ public func exchangeOAuthKey(
 /// Returns the inner `data` payload. Mirrors the JS SDK's `userInfo`.
 public func fetchUserInfo(
     apiKey: String,
-    baseURL: String = TrustedRouterConstants.defaultAPIBaseURL,
+    baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
     urlSession: URLSession = .shared
 ) async throws -> UserInfo {
     if apiKey.isEmpty {
         throw TrustedRouterError.internalError("apiKey is required")
     }
-    let client = try TrustedRouter(options: .init(apiKey: apiKey, baseUrl: baseURL, urlSession: urlSession))
-    let envelope: UserInfoResponse = try await client.request(method: "GET", path: "/auth/userinfo")
+    let client = try TrustedRouter(options: .init(apiKey: apiKey, controlBaseURL: baseURL, urlSession: urlSession))
+    let envelope: UserInfoResponse = try await client.request(method: "GET", path: "/auth/userinfo", plane: .control)
     return envelope.data
 }
 
@@ -441,7 +441,7 @@ public final class TrustedRouterOAuth {
     public var spawnCloud: String?
 
     public init(
-        baseURL: String = TrustedRouterConstants.defaultAPIBaseURL,
+        baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
         urlSession: URLSession = .shared,
         keyLabel: String? = nil,
         limit: String? = nil,

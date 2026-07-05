@@ -19,22 +19,23 @@ extension TrustedRouter {
                 openWeights: openWeights,
                 providerJurisdiction: providerJurisdiction,
                 providerRegion: providerRegion
-            )
+            ),
+            plane: .control
         )
     }
     
     public func providers() async throws -> DataList<ProviderInfo> {
-        return try await request(method: "GET", path: "/providers")
+        return try await request(method: "GET", path: "/providers", plane: .control)
     }
     
     public func regions() async throws -> DataList<RegionInfo> {
-        return try await request(method: "GET", path: "/regions")
+        return try await request(method: "GET", path: "/regions", plane: .control)
     }
     
     public func credits(workspaceId: String? = nil) async throws -> CreditsResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "GET", path: "/credits", options: options)
+        return try await request(method: "GET", path: "/credits", options: options, plane: .control)
     }
     
     // ---- chat ------------------------------------------------------------
@@ -389,7 +390,7 @@ extension TrustedRouter {
     public func broadcastDestinations(workspaceId: String? = nil) async throws -> DataList<BroadcastDestination> {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "GET", path: "/broadcast/destinations", options: options)
+        return try await request(method: "GET", path: "/broadcast/destinations", options: options, plane: .control)
     }
     
     public func createBroadcastDestination(
@@ -416,31 +417,31 @@ extension TrustedRouter {
         
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "POST", path: "/broadcast/destinations", body: body, options: options)
+        return try await request(method: "POST", path: "/broadcast/destinations", body: body, options: options, plane: .control)
     }
     
     public func getBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "GET", path: "/broadcast/destinations/\(id)", options: options)
+        return try await request(method: "GET", path: "/broadcast/destinations/\(id)", options: options, plane: .control)
     }
     
     public func updateBroadcastDestination(id: String, patch: [String: Any], workspaceId: String? = nil) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "PATCH", path: "/broadcast/destinations/\(id)", body: patch, options: options)
+        return try await request(method: "PATCH", path: "/broadcast/destinations/\(id)", body: patch, options: options, plane: .control)
     }
     
     public func deleteBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "DELETE", path: "/broadcast/destinations/\(id)", options: options)
+        return try await request(method: "DELETE", path: "/broadcast/destinations/\(id)", options: options, plane: .control)
     }
     
     public func testBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "POST", path: "/broadcast/destinations/\(id)/test", options: options)
+        return try await request(method: "POST", path: "/broadcast/destinations/\(id)/test", options: options, plane: .control)
     }
     
     public func billingCheckout(
@@ -458,15 +459,15 @@ extension TrustedRouter {
         if body["workspace_id"] == nil && options.workspaceId != nil {
             body["workspace_id"] = options.workspaceId
         }
-        return try await request(method: "POST", path: "/billing/checkout", body: body, options: options)
+        return try await request(method: "POST", path: "/billing/checkout", body: body, options: options, plane: .control)
     }
     
     public func authSession() async throws -> AuthSessionResponse {
-        return try await request(method: "GET", path: "/auth/session")
+        return try await request(method: "GET", path: "/auth/session", plane: .control)
     }
     
     public func logout() async throws -> EmptyResponse {
-        return try await request(method: "POST", path: "/auth/logout")
+        return try await request(method: "POST", path: "/auth/logout", plane: .control)
     }
     
     public func activity(params: [String: Any] = [:]) async throws -> ActivityResponse {
@@ -479,7 +480,7 @@ extension TrustedRouter {
         let queryStr = urlComponents.query ?? ""
         let path = queryStr.isEmpty ? "/activity" : "/activity?\(queryStr)"
         
-        return try await request(method: "GET", path: path)
+        return try await request(method: "GET", path: path, plane: .control)
     }
 
     public func status(url: String = TrustedRouterConstants.defaultStatusURL) async throws -> [String: Any] {

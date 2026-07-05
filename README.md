@@ -2,7 +2,7 @@
 
 Swift SDK for [TrustedRouter](https://trustedrouter.com).
 
-This is a pure Swift, zero-dependency client SDK for the Quill Cloud API gateway. It provides the same interface, error handling, SSE streaming, and GCP Confidential Space JWT verification as the Python and Javascript SDKs.
+This is a pure Swift, zero-dependency client SDK for the TrustedRouter gateway. It provides the same interface, error handling, SSE streaming, and GCP Confidential Space JWT verification as the Python and Javascript SDKs.
 
 ## Installation
 
@@ -42,6 +42,12 @@ for try await chunk in stream {
     }
 }
 ```
+
+By default, inference routes use `https://api.trustedrouter.com/v1`.
+Metadata, account, OAuth, billing, activity, provider, region, credit, and
+broadcast-destination routes use the control plane at
+`https://trustedrouter.com/v1`. Override inference routing with `baseUrl` or
+`region`, and override control routing with `controlBaseURL`.
 
 ### Fusion
 

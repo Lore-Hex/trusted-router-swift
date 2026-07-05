@@ -69,14 +69,14 @@ final class OAuthLoopbackTests: XCTestCase {
 
     func testAuthorizeURLUsesLoopbackCallbackWithPKCEAndState() async throws {
         let loopback = OAuthLoopback(
-            baseURL: "https://api.quillrouter.com/v1",
+            baseURL: "https://trustedrouter.com/v1",
             keyLabel: "Lore Games",
             limit: "5"
         )
         let url = try await loopback.authorizeURL()
 
         XCTAssertEqual(url.scheme, "https")
-        XCTAssertEqual(url.host, "api.quillrouter.com")
+        XCTAssertEqual(url.host, "trustedrouter.com")
         XCTAssertEqual(url.path, "/v1/auth")
 
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)!.queryItems ?? []

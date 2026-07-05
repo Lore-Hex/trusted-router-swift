@@ -9,7 +9,8 @@ import FoundationNetworking
 /// <https://trustedrouter.com> publishes.
 public enum TrustedRouterConstants {
     public static let version = "0.4.1"
-    public static let defaultAPIBaseURL = "https://api.quillrouter.com/v1"
+    public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
+    public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
     public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
     public static let defaultStatusURL = "https://status.trustedrouter.com/status.json"
     public static let autoModel = "trustedrouter/auto"
@@ -37,8 +38,8 @@ public enum TrustedRouterConstants {
     ]
 
     public static let regionHosts: [String: String] = [
-        "us-central1": "api.quillrouter.com",
-        "europe-west4": "api-europe-west4.quillrouter.com"
+        "us-central1": "api.trustedrouter.com",
+        "europe-west4": "api-europe-west4.trustedrouter.com"
     ]
 }
 
@@ -92,11 +93,14 @@ public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
 /// passing only the fields you want to override.
 ///
 /// Pass either `region` (canonical regional host) or `baseUrl` (explicit
-/// override) — not both. `maxRetries` applies to 429 and ≥500 responses.
+/// override) — not both. Both configure the inference plane. Use
+/// `controlBaseURL` to override metadata/account/OAuth routes separately.
+/// `maxRetries` applies to 429 and ≥500 responses.
 public struct TrustedRouterOptions {
     public var apiKey: String?
     public var baseUrl: String?
     public var region: String?
+    public var controlBaseURL: String?
     public var urlSession: URLSession
     public var headers: [String: String]
     public var workspaceId: String?
@@ -106,6 +110,7 @@ public struct TrustedRouterOptions {
         apiKey: String? = nil,
         baseUrl: String? = nil,
         region: String? = nil,
+        controlBaseURL: String? = nil,
         urlSession: URLSession = .shared,
         headers: [String: String] = [:],
         workspaceId: String? = nil,
@@ -114,6 +119,7 @@ public struct TrustedRouterOptions {
         self.apiKey = apiKey
         self.baseUrl = baseUrl
         self.region = region
+        self.controlBaseURL = controlBaseURL
         self.urlSession = urlSession
         self.headers = headers
         self.workspaceId = workspaceId

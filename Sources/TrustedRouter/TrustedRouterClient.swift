@@ -4,7 +4,14 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Thin, typed Swift client for the TrustedRouter / Quill Cloud gateway.
+/// Request routing plane for methods that need to choose between inference
+/// and control/metadata hosts.
+public enum TrustedRouterRequestPlane: Sendable {
+    case inference
+    case control
+}
+
+/// Thin, typed Swift client for the TrustedRouter gateway.
 ///
 /// Construct once with a `TrustedRouterOptions`, then call any of the
 /// endpoint methods declared in `TrustedRouter+Methods.swift`. All public
@@ -14,6 +21,7 @@ import FoundationNetworking
 public final class TrustedRouter: Sendable {
     public let apiKey: String?
     public let baseUrl: String
+    public let controlBaseURL: String
     public let region: String?
     public let urlSession: URLSession
     public let defaultHeaders: [String: String]
@@ -29,12 +37,17 @@ public final class TrustedRouter: Sendable {
             computedBaseUrl = try regionBaseUrl(region: region)
         }
 
+        func trimTrailingSlashes(_ value: String) -> String {
+            var trimmed = value
+            while trimmed.hasSuffix("/") { trimmed.removeLast() }
+            return trimmed
+        }
+
         self.apiKey = options.apiKey
         // Strip any trailing slashes so the path-join in `rawRequest` doesn't
         // emit a double-slash URL.
-        var trimmed = computedBaseUrl
-        while trimmed.hasSuffix("/") { trimmed.removeLast() }
-        self.baseUrl = trimmed
+        self.baseUrl = trimTrailingSlashes(computedBaseUrl)
+        self.controlBaseURL = trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
         self.region = options.region
         self.urlSession = options.urlSession
         self.defaultHeaders = options.headers
@@ -81,10 +94,25 @@ public final class TrustedRouter: Sendable {
         if let selectedWorkspaceId = workspaceId ?? self.workspaceId {
             out["x-trustedrouter-workspace"] = selectedWorkspaceId
         }
-        if let bearer = apiKey ?? self.apiKey, out["authorization"] == nil {
+        if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty, out["authorization"] == nil {
             out["authorization"] = "Bearer \(bearer)"
         }
         return out
+    }
+
+    private func baseURL(for plane: TrustedRouterRequestPlane) -> String {
+        switch plane {
+        case .inference: return baseUrl
+        case .control: return controlBaseURL
+        }
+    }
+
+    private func requestURLString(path: String, plane: TrustedRouterRequestPlane) -> String {
+        if let components = URLComponents(string: path), components.scheme != nil {
+            return path
+        }
+        let relativePath = path.replacingOccurrences(of: "^/+", with: "", options: .regularExpression)
+        return "\(baseURL(for: plane))/\(relativePath)"
     }
 
     private func parseRetryAfter(_ response: HTTPURLResponse) -> Double? {
@@ -146,9 +174,10 @@ public final class TrustedRouter: Sendable {
         path: String,
         headers: [String: String]? = nil,
         body: Data? = nil,
-        options: PerCallOptions = PerCallOptions()
+        options: PerCallOptions = PerCallOptions(),
+        plane: TrustedRouterRequestPlane = .inference
     ) async throws -> (Data, HTTPURLResponse) {
-        let urlString = "\(baseUrl)/\(path.replacingOccurrences(of: "^/+", with: "", options: .regularExpression))"
+        let urlString = requestURLString(path: path, plane: plane)
         guard let url = URL(string: urlString) else {
             throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
         }
@@ -189,9 +218,10 @@ public final class TrustedRouter: Sendable {
         path: String,
         headers: [String: String]? = nil,
         body: Data? = nil,
-        options: PerCallOptions = PerCallOptions()
+        options: PerCallOptions = PerCallOptions(),
+        plane: TrustedRouterRequestPlane = .inference
     ) async throws -> (TrustedRouterByteStream, HTTPURLResponse) {
-        let urlString = "\(baseUrl)/\(path.replacingOccurrences(of: "^/+", with: "", options: .regularExpression))"
+        let urlString = requestURLString(path: path, plane: plane)
         guard let url = URL(string: urlString) else {
             throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
         }
@@ -266,7 +296,8 @@ public final class TrustedRouter: Sendable {
         path: String,
         headers: [String: String]? = nil,
         body: Any? = nil,
-        options: PerCallOptions = PerCallOptions()
+        options: PerCallOptions = PerCallOptions(),
+        plane: TrustedRouterRequestPlane = .inference
     ) async throws -> T {
         var bodyData: Data? = nil
         if let body = body {
@@ -280,7 +311,7 @@ public final class TrustedRouter: Sendable {
         var attempt = 0
         while true {
             do {
-                let (data, response) = try await rawRequest(method: method, path: path, headers: headers, body: bodyData, options: options)
+                let (data, response) = try await rawRequest(method: method, path: path, headers: headers, body: bodyData, options: options, plane: plane)
                 if attempt >= maxRetries || !isRetryable(response.statusCode) {
                     if response.statusCode >= 400 {
                         throw classifyError(statusCode: response.statusCode, data: data, response: response)
