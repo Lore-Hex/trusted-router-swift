@@ -5,8 +5,8 @@ import XCTest
 import FoundationNetworking
 #endif
 
-/// Status-code → `TrustedRouterError` classification, and the retry loop's
-/// honoring of Retry-After + exponential backoff.
+/// Status-code → `TrustedRouterError` classification, and retry behavior for
+/// rate limits plus apex regional failover.
 final class RetryAndClassificationTests: XCTestCase {
 
     private var router: TrustedRouter!
@@ -31,6 +31,7 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch TrustedRouterError.authentication(let code, let msg, _) {
             XCTAssertEqual(code, 401)
             XCTAssertEqual(msg, "bad key")
+            XCTAssertEqual(SequenceProtocol.served, 1)
         } catch { XCTFail("wrong error: \(error)") }
     }
 
@@ -51,17 +52,20 @@ final class RetryAndClassificationTests: XCTestCase {
             XCTFail("expected notFound")
         } catch TrustedRouterError.notFound { /* expected */ }
         catch { XCTFail("wrong error: \(error)") }
+        XCTAssertEqual(SequenceProtocol.served, 1)
     }
 
-    func test501MapsToEndpointNotSupportedAfterRetriesExhaust() async {
-        // 501 is in the retryable band (≥ 500) so it gets retried; after
-        // maxRetries=2 → 3 attempts, the final attempt classifies.
-        SequenceProtocol.scripted = Array(repeating: (501, "", nil as String?), count: 5)
+    func test501MapsToEndpointNotSupportedWithoutFailoverRetry() async {
+        SequenceProtocol.scripted = [
+            (501, "", nil),
+            (200, #"{}"#, nil),
+        ]
         do {
             let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
             XCTFail("expected endpointNotSupported")
         } catch TrustedRouterError.endpointNotSupported { /* expected */ }
         catch { XCTFail("wrong error: \(error)") }
+        XCTAssertEqual(SequenceProtocol.served, 1)
     }
 
     func test400Range4xxMapsToBadRequest() async {
@@ -71,6 +75,7 @@ final class RetryAndClassificationTests: XCTestCase {
             XCTFail("expected badRequest")
         } catch TrustedRouterError.badRequest { /* expected */ }
         catch { XCTFail("wrong error: \(error)") }
+        XCTAssertEqual(SequenceProtocol.served, 1)
     }
 
     func test429MapsToRateLimitAndCarriesRetryAfter() async throws {
@@ -86,22 +91,120 @@ final class RetryAndClassificationTests: XCTestCase {
             XCTFail("expected rateLimit")
         } catch TrustedRouterError.rateLimit(_, _, _, let retryAfter) {
             XCTAssertEqual(retryAfter, 1.0)
+            XCTAssertEqual(SequenceProtocol.served, 3)
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func test500IsRetriedAndCanSucceed() async throws {
-        // First two attempts 503, third returns success — must be retried.
+    func testFailoverableStatusRetriesSameApexAndCanSucceed() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SequenceProtocol.self]
+        SequenceProtocol.reset()
+        let apexRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 2
+        ))
+
         SequenceProtocol.scripted = [
             (503, #"{"error":{"message":"down"}}"#, nil),
             (503, #"{"error":{"message":"still down"}}"#, nil),
             (200, #"{}"#, nil),
         ]
-        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+        let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(SequenceProtocol.served, 3, "should have made all three attempts")
+        XCTAssertEqual(
+            SequenceProtocol.requestedHosts,
+            ["api.trustedrouter.com", "api.trustedrouter.com", "api.trustedrouter.com"]
+        )
+    }
+
+    func test500DoesNotFailoverRetry() async {
+        SequenceProtocol.scripted = [
+            (500, #"{"error":{"message":"server error"}}"#, nil),
+            (200, #"{}"#, nil),
+        ]
+        do {
+            let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+            XCTFail("expected generic error")
+        } catch TrustedRouterError.generic(let code, let msg, _) {
+            XCTAssertEqual(code, 500)
+            XCTAssertEqual(msg, "server error")
+            XCTAssertEqual(SequenceProtocol.served, 1)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func testFailoverableStatusDoesNotRetryWhenRegionalFailoverDisabled() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SequenceProtocol.self]
+        SequenceProtocol.reset()
+        let noFailoverRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 2,
+            regionalFailover: false
+        ))
+
+        SequenceProtocol.scripted = [
+            (502, #"{"error":{"message":"bad gateway"}}"#, nil),
+            (200, #"{}"#, nil),
+        ]
+        do {
+            let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
+            XCTFail("expected generic error")
+        } catch TrustedRouterError.generic(let code, let msg, _) {
+            XCTAssertEqual(code, 502)
+            XCTAssertEqual(msg, "bad gateway")
+            XCTAssertEqual(SequenceProtocol.served, 1)
+        } catch { XCTFail("wrong error: \(error)") }
+    }
+
+    func testTransportErrorRetriesInferenceApexWhenRegionalFailoverEnabled() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TransportSequenceProtocol.self]
+        TransportSequenceProtocol.reset()
+        let apexRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 1
+        ))
+
+        TransportSequenceProtocol.scripted = [
+            .failure(URLError(.cannotConnectToHost)),
+            .response(200, #"{}"#),
+        ]
+        let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
+        XCTAssertEqual(TransportSequenceProtocol.served, 2)
+        XCTAssertEqual(
+            TransportSequenceProtocol.requestedHosts,
+            ["api.trustedrouter.com", "api.trustedrouter.com"]
+        )
+    }
+
+    func testTransportErrorDoesNotRetryWhenRegionalFailoverDisabled() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TransportSequenceProtocol.self]
+        TransportSequenceProtocol.reset()
+        let noFailoverRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 1,
+            regionalFailover: false
+        ))
+
+        TransportSequenceProtocol.scripted = [
+            .failure(URLError(.cannotConnectToHost)),
+            .response(200, #"{}"#),
+        ]
+        do {
+            let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
+            XCTFail("expected transport failure")
+        } catch TrustedRouterError.internalError {
+            XCTAssertEqual(TransportSequenceProtocol.served, 1)
+        } catch { XCTFail("wrong error: \(error)") }
     }
 
     func test4xxOutsideKnownCodesDoesNotRetry() async {
-        // 422 isn't in the retryable set (only 429 and ≥500). Should fail-fast.
+        // 422 isn't in the retryable set. Should fail-fast.
         SequenceProtocol.scripted = [
             (422, #"{"error":{"message":"unprocessable"}}"#, nil),
             (200, #"{}"#, nil),
@@ -130,15 +233,20 @@ final class RetryAndClassificationTests: XCTestCase {
 private final class SequenceProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var scripted: [(Int, String, String?)] = []
     nonisolated(unsafe) static var served: Int = 0
+    nonisolated(unsafe) static var requestedHosts: [String] = []
 
     static func reset() {
         scripted = []
         served = 0
+        requestedHosts = []
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if let host = request.url?.host {
+            Self.requestedHosts.append(host)
+        }
         let idx = Self.served
         Self.served += 1
         let (code, body, retryAfter) = (idx < Self.scripted.count) ? Self.scripted[idx] : (500, "out of script", nil)
@@ -153,3 +261,45 @@ private final class SequenceProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private enum TransportOutcome {
+    case failure(URLError)
+    case response(Int, String)
+}
+
+private final class TransportSequenceProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var scripted: [TransportOutcome] = []
+    nonisolated(unsafe) static var served: Int = 0
+    nonisolated(unsafe) static var requestedHosts: [String] = []
+
+    static func reset() {
+        scripted = []
+        served = 0
+        requestedHosts = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if let host = request.url?.host {
+            Self.requestedHosts.append(host)
+        }
+        let idx = Self.served
+        Self.served += 1
+        let outcome = idx < Self.scripted.count ? Self.scripted[idx] : .failure(URLError(.unknown))
+        switch outcome {
+        case .failure(let error):
+            client?.urlProtocol(self, didFailWithError: error)
+        case .response(let code, let body):
+            let resp = HTTPURLResponse(
+                url: request.url!,
+                statusCode: code,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(body.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
+}

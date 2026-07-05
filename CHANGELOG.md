@@ -8,6 +8,8 @@ All notable changes to this SDK are documented here. Format roughly follows
 
 ### Changed
 - Default inference base URL is now `https://api.trustedrouter.com/v1`.
+- Regional failover now re-requests the apex global load balancer; per-region
+  inference hostnames were removed.
 - Added `TrustedRouterConstants.defaultControlBaseURL` and the
   `TrustedRouterOptions.controlBaseURL` override for control-plane routes.
 - Routed catalog, provider/region, credits, activity, auth/OAuth, billing,

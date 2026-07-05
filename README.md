@@ -46,8 +46,10 @@ for try await chunk in stream {
 By default, inference routes use `https://api.trustedrouter.com/v1`.
 Metadata, account, OAuth, billing, activity, provider, region, credit, and
 broadcast-destination routes use the control plane at
-`https://trustedrouter.com/v1`. Override inference routing with `baseUrl` or
-`region`, and override control routing with `controlBaseURL`.
+`https://trustedrouter.com/v1`. Override inference routing with `baseUrl`, and
+override control routing with `controlBaseURL`. Regional failover re-requests
+the inference apex because `api.trustedrouter.com` is a global load balancer;
+the SDK no longer pins per-region hostnames.
 
 ### Fusion
 
@@ -76,7 +78,7 @@ call. `preset: "quality"` or `"budget"` selects a built-in panel.
 - **Streaming**: Native parsing of SSE using `AsyncThrowingStream`, with `URLSession.AsyncBytes` on Apple platforms and a Linux-safe byte stream fallback.
 - **Attestation Verification**: Verifies the Confidential Space JWT using `CryptoKit`/`Security`.
 - **Pure Swift**: No 3rd party dependencies. Operates seamlessly on macOS, iOS, tvOS, watchOS, and Linux with `FoundationNetworking`.
-- **Retries**: Implements transparent exponential backoff on `429` and `5xx` errors.
+- **Retries**: Implements transparent exponential backoff on `429` responses and apex failover retries for `502`/`503`/`504` or transport errors.
 
 ## Sign in with TrustedRouter
 

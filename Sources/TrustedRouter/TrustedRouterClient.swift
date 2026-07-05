@@ -22,21 +22,13 @@ public final class TrustedRouter: Sendable {
     public let apiKey: String?
     public let baseUrl: String
     public let controlBaseURL: String
-    public let region: String?
     public let urlSession: URLSession
     public let defaultHeaders: [String: String]
     public let maxRetries: Int
+    public let regionalFailover: Bool
     public let workspaceId: String?
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
-        if options.region != nil && options.baseUrl != nil {
-            throw TrustedRouterError.internalError("pass region OR baseUrl, not both")
-        }
-        var computedBaseUrl = options.baseUrl ?? TrustedRouterConstants.defaultAPIBaseURL
-        if let region = options.region {
-            computedBaseUrl = try regionBaseUrl(region: region)
-        }
-
         func trimTrailingSlashes(_ value: String) -> String {
             var trimmed = value
             while trimmed.hasSuffix("/") { trimmed.removeLast() }
@@ -46,12 +38,12 @@ public final class TrustedRouter: Sendable {
         self.apiKey = options.apiKey
         // Strip any trailing slashes so the path-join in `rawRequest` doesn't
         // emit a double-slash URL.
-        self.baseUrl = trimTrailingSlashes(computedBaseUrl)
+        self.baseUrl = trimTrailingSlashes(options.baseUrl ?? TrustedRouterConstants.defaultAPIBaseURL)
         self.controlBaseURL = trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
-        self.region = options.region
         self.urlSession = options.urlSession
         self.defaultHeaders = options.headers
         self.maxRetries = max(0, options.maxRetries)
+        self.regionalFailover = options.regionalFailover
         self.workspaceId = options.workspaceId
     }
 
@@ -122,8 +114,26 @@ public final class TrustedRouter: Sendable {
         return nil
     }
 
-    private func isRetryable(_ statusCode: Int) -> Bool {
-        return statusCode == 429 || statusCode >= 500
+    private func isFailoverableStatus(_ statusCode: Int) -> Bool {
+        return statusCode == 502 || statusCode == 503 || statusCode == 504
+    }
+
+    private func usesInferenceBase(path: String, plane: TrustedRouterRequestPlane) -> Bool {
+        if plane != .inference {
+            return false
+        }
+        return URLComponents(string: path)?.scheme == nil
+    }
+
+    private func shouldRetry(statusCode: Int, path: String, plane: TrustedRouterRequestPlane) -> Bool {
+        if statusCode == 429 {
+            return true
+        }
+        return regionalFailover && usesInferenceBase(path: path, plane: plane) && isFailoverableStatus(statusCode)
+    }
+
+    private func shouldRetryTransportError(path: String, plane: TrustedRouterRequestPlane) -> Bool {
+        return regionalFailover && usesInferenceBase(path: path, plane: plane)
     }
 
     private func retrySleepMs(attempt: Int, retryAfterSeconds: Double?) -> UInt64 {
@@ -221,47 +231,72 @@ public final class TrustedRouter: Sendable {
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference
     ) async throws -> (TrustedRouterByteStream, HTTPURLResponse) {
-        let urlString = requestURLString(path: path, plane: plane)
-        guard let url = URL(string: urlString) else {
-            throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
-        }
+        var attempt = 0
+        while true {
+            let urlString = requestURLString(path: path, plane: plane)
+            guard let url = URL(string: urlString) else {
+                throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
+            }
 
-        var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.httpBody = body
-        if let timeout = options.timeout {
-            req.timeoutInterval = timeout
-        }
+            var req = URLRequest(url: url)
+            req.httpMethod = method
+            req.httpBody = body
+            if let timeout = options.timeout {
+                req.timeoutInterval = timeout
+            }
 
-        let reqHeaders = buildHeaders(
-            headers: headers,
-            extraHeaders: options.extraHeaders,
-            idempotencyKey: options.idempotencyKey,
-            apiKey: options.apiKey,
-            workspaceId: options.workspaceId
-        )
+            let reqHeaders = buildHeaders(
+                headers: headers,
+                extraHeaders: options.extraHeaders,
+                idempotencyKey: options.idempotencyKey,
+                apiKey: options.apiKey,
+                workspaceId: options.workspaceId
+            )
 
-        for (k, v) in reqHeaders {
-            req.setValue(v, forHTTPHeaderField: k)
-        }
-        
-        if body != nil && req.value(forHTTPHeaderField: "Content-Type") == nil {
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
+            for (k, v) in reqHeaders {
+                req.setValue(v, forHTTPHeaderField: k)
+            }
 
-        #if os(Linux)
-        let (data, response) = try await urlSession.data(for: req)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw TrustedRouterError.internalError("Non-HTTP response")
+            if body != nil && req.value(forHTTPHeaderField: "Content-Type") == nil {
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+
+            do {
+                #if os(Linux)
+                let (data, response) = try await urlSession.data(for: req)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw TrustedRouterError.internalError("Non-HTTP response")
+                }
+                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
+                    let retryAfter = parseRetryAfter(httpResponse)
+                    try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
+                    attempt += 1
+                    continue
+                }
+                return (Self.byteStream(from: data), httpResponse)
+                #else
+                let (bytes, response) = try await urlSession.bytes(for: req)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw TrustedRouterError.internalError("Non-HTTP response")
+                }
+                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
+                    let retryAfter = parseRetryAfter(httpResponse)
+                    try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
+                    attempt += 1
+                    continue
+                }
+                return (Self.byteStream(from: bytes), httpResponse)
+                #endif
+            } catch let err as TrustedRouterError {
+                throw err
+            } catch {
+                if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
+                    throw TrustedRouterError.internalError(error.localizedDescription)
+                }
+                try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
+                attempt += 1
+            }
         }
-        return (Self.byteStream(from: data), httpResponse)
-        #else
-        let (bytes, response) = try await urlSession.bytes(for: req)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw TrustedRouterError.internalError("Non-HTTP response")
-        }
-        return (Self.byteStream(from: bytes), httpResponse)
-        #endif
     }
 
     private static func byteStream(from data: Data) -> TrustedRouterByteStream {
@@ -310,40 +345,52 @@ public final class TrustedRouter: Sendable {
 
         var attempt = 0
         while true {
+            let data: Data
+            let response: HTTPURLResponse
             do {
-                let (data, response) = try await rawRequest(method: method, path: path, headers: headers, body: bodyData, options: options, plane: plane)
-                if attempt >= maxRetries || !isRetryable(response.statusCode) {
-                    if response.statusCode >= 400 {
-                        throw classifyError(statusCode: response.statusCode, data: data, response: response)
-                    }
-                    
-                    if T.self == Data.self {
-                        return data as! T
-                    }
-                    
-                    if data.isEmpty {
-                        // For Void or empty responses, we might need a better way.
-                        // For now we'll try to decode empty JSON.
-                        if let emptyObj = "{}" .data(using: .utf8) {
-                            return try JSONDecoder().decode(T.self, from: emptyObj)
-                        }
-                    }
-
-                    return try JSONDecoder().decode(T.self, from: data)
-                }
-                
-                let retryAfter = parseRetryAfter(response)
-                try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
-                attempt += 1
+                (data, response) = try await rawRequest(
+                    method: method,
+                    path: path,
+                    headers: headers,
+                    body: bodyData,
+                    options: options,
+                    plane: plane
+                )
             } catch let err as TrustedRouterError {
                 throw err
             } catch {
-                if attempt >= maxRetries {
+                if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
                 try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
                 attempt += 1
+                continue
             }
+
+            if response.statusCode >= 400 {
+                if attempt < maxRetries && shouldRetry(statusCode: response.statusCode, path: path, plane: plane) {
+                    let retryAfter = parseRetryAfter(response)
+                    try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
+                    attempt += 1
+                    continue
+                }
+
+                throw classifyError(statusCode: response.statusCode, data: data, response: response)
+            }
+
+            if T.self == Data.self {
+                return data as! T
+            }
+
+            if data.isEmpty {
+                // For Void or empty responses, we might need a better way.
+                // For now we'll try to decode empty JSON.
+                if let emptyObj = "{}" .data(using: .utf8) {
+                    return try JSONDecoder().decode(T.self, from: emptyObj)
+                }
+            }
+
+            return try JSONDecoder().decode(T.self, from: data)
         }
     }
 }

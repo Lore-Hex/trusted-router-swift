@@ -4,9 +4,7 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Compile-time constants for the SDK: version, default endpoints, and the
-/// region → host table used by `regionBaseUrl`. Defaults match what
-/// <https://trustedrouter.com> publishes.
+/// Compile-time constants for the SDK: version, default endpoints, and models.
 public enum TrustedRouterConstants {
     public static let version = "0.4.1"
     public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
@@ -36,21 +34,6 @@ public enum TrustedRouterConstants {
         "google/gemini-3-flash-preview",
         "tencent/hy3-preview"
     ]
-
-    public static let regionHosts: [String: String] = [
-        "us-central1": "api.trustedrouter.com",
-        "europe-west4": "api-europe-west4.trustedrouter.com"
-    ]
-}
-
-/// Look up the canonical base URL for a TrustedRouter region. Throws
-/// `internalError` if `region` isn't in the published `regionHosts` table.
-public func regionBaseUrl(region: String) throws -> String {
-    guard let host = TrustedRouterConstants.regionHosts[region] else {
-        let known = TrustedRouterConstants.regionHosts.keys.sorted().joined(separator: ", ")
-        throw TrustedRouterError.internalError("unknown TrustedRouter region '\(region)'; known: \(known)")
-    }
-    return "https://\(host)/v1"
 }
 
 /// Every error the SDK surfaces. Each HTTP-status case carries the original
@@ -92,38 +75,40 @@ public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
 /// Configuration for a `TrustedRouter` client. Construct with `init(...)`,
 /// passing only the fields you want to override.
 ///
-/// Pass either `region` (canonical regional host) or `baseUrl` (explicit
-/// override) — not both. Both configure the inference plane. Use
-/// `controlBaseURL` to override metadata/account/OAuth routes separately.
-/// `maxRetries` applies to 429 and ≥500 responses.
+/// Use `baseUrl` to override inference routing and `controlBaseURL` to
+/// override metadata/account/OAuth routes separately. `maxRetries` applies to
+/// 429 responses and, when `regionalFailover` is enabled, 502/503/504
+/// responses and transport errors.
 public struct TrustedRouterOptions {
     public var apiKey: String?
     public var baseUrl: String?
-    public var region: String?
     public var controlBaseURL: String?
     public var urlSession: URLSession
     public var headers: [String: String]
     public var workspaceId: String?
     public var maxRetries: Int
+    /// The apex is a global load balancer; failover is handled server-side, so
+    /// the SDK re-requests the apex rather than pinning per-region hosts.
+    public var regionalFailover: Bool
 
     public init(
         apiKey: String? = nil,
         baseUrl: String? = nil,
-        region: String? = nil,
         controlBaseURL: String? = nil,
         urlSession: URLSession = .shared,
         headers: [String: String] = [:],
         workspaceId: String? = nil,
-        maxRetries: Int = 2
+        maxRetries: Int = 2,
+        regionalFailover: Bool = true
     ) {
         self.apiKey = apiKey
         self.baseUrl = baseUrl
-        self.region = region
         self.controlBaseURL = controlBaseURL
         self.urlSession = urlSession
         self.headers = headers
         self.workspaceId = workspaceId
         self.maxRetries = maxRetries
+        self.regionalFailover = regionalFailover
     }
 }
 

@@ -39,6 +39,34 @@ final class StreamingErrorTests: XCTestCase {
         }
     }
 
+    func testChatCompletionsChunksRetriesFailoverableStatusAgainstApex() async throws {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [StreamSequenceProtocol.self]
+        StreamSequenceProtocol.reset()
+        let router = try TrustedRouter(options: TrustedRouterOptions(
+            apiKey: "key",
+            urlSession: URLSession(configuration: cfg),
+            maxRetries: 1
+        ))
+
+        StreamSequenceProtocol.scripted = [
+            (503, #"{"error":{"message":"temporarily unavailable"}}"#),
+            (200, #"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"# + "\n\n"),
+        ]
+
+        let stream = try await router.chatCompletionsChunks(
+            messages: [["role": "user", "content": "hi"]]
+        )
+        var chunks: [ChatCompletionChunk] = []
+        for try await chunk in stream {
+            chunks.append(chunk)
+        }
+
+        XCTAssertEqual(StreamSequenceProtocol.served, 2)
+        XCTAssertEqual(StreamSequenceProtocol.requestedHosts, ["api.trustedrouter.com", "api.trustedrouter.com"])
+        XCTAssertEqual(chunks.first?.choices.first?.delta?.content, "ok")
+    }
+
     private func makeOptions() -> TrustedRouterOptions {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [ErrorBodyProtocol.self]
@@ -60,6 +88,39 @@ private final class ErrorBodyProtocol: URLProtocol, @unchecked Sendable {
         let resp = HTTPURLResponse(url: request.url!, statusCode: code,
                                    httpVersion: "HTTP/1.1",
                                    headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class StreamSequenceProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var scripted: [(Int, String)] = []
+    nonisolated(unsafe) static var served: Int = 0
+    nonisolated(unsafe) static var requestedHosts: [String] = []
+
+    static func reset() {
+        scripted = []
+        served = 0
+        requestedHosts = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        if let host = request.url?.host {
+            Self.requestedHosts.append(host)
+        }
+        let idx = Self.served
+        Self.served += 1
+        let (code, body) = idx < Self.scripted.count ? Self.scripted[idx] : (500, "")
+        let resp = HTTPURLResponse(
+            url: request.url!,
+            statusCode: code,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": code == 200 ? "text/event-stream" : "application/json"]
+        )!
         client?.urlProtocol(self, didReceive: resp, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
         client?.urlProtocolDidFinishLoading(self)
