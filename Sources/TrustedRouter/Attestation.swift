@@ -89,6 +89,26 @@ public struct AttestationVerificationError: Error, LocalizedError, CustomStringC
 
 public let GCPIssuer = "https://confidentialcomputing.googleapis.com"
 public let GCPJwksURI = "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com"
+public let exporterLabel = "EXPORTER-Channel-Binding"
+public let exporterLength = 32
+
+extension Data {
+    var hexString: String {
+        map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+private func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
+    let lhsBytes = Array(lhs.utf8)
+    let rhsBytes = Array(rhs.utf8)
+    var difference = lhsBytes.count ^ rhsBytes.count
+    for i in 0..<max(lhsBytes.count, rhsBytes.count) {
+        let l = i < lhsBytes.count ? lhsBytes[i] : 0
+        let r = i < rhsBytes.count ? rhsBytes[i] : 0
+        difference |= Int(l ^ r)
+    }
+    return difference == 0
+}
 
 extension TrustedRouter {
     public func attestation() async throws -> Data {
@@ -169,6 +189,7 @@ public func verifyGatewayAttestation(
     policy: AttestationPolicy,
     nonceHex: String? = nil,
     tlsCertDer: Data? = nil,
+    tlsExporter: Data? = nil,
     jwks: [String: Any]? = nil,
     jwksUrl: String = GCPJwksURI,
     urlSession: URLSession = .shared
@@ -263,10 +284,10 @@ public func verifyGatewayAttestation(
     #endif
     
     // Check claims
-    return try checkClaims(claims: payload, policy: policy, nonceHex: nonceHex, tlsCertDer: tlsCertDer)
+    return try checkClaims(claims: payload, policy: policy, nonceHex: nonceHex, tlsCertDer: tlsCertDer, tlsExporter: tlsExporter)
 }
 
-private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonceHex: String?, tlsCertDer: Data?) throws -> GatewayAttestation {
+private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonceHex: String?, tlsCertDer: Data?, tlsExporter: Data?) throws -> GatewayAttestation {
     let now = Int(Date().timeIntervalSince1970)
     if let exp = claims["exp"] as? Int, exp <= now {
         throw AttestationVerificationError("JWT expired at \(exp) (now=\(now))")
@@ -312,10 +333,25 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
     
     var nonceMatch: String? = nil
     if let nonceHex = nonceHex {
-        if !nonces.contains(nonceHex) {
+        if !nonces.contains(where: { constantTimeEquals($0, nonceHex) }) {
             throw AttestationVerificationError("nonce \(nonceHex) not present in JWT nonces \(nonces)")
         }
         nonceMatch = nonceHex
+    }
+
+    if let tlsExporter = tlsExporter {
+        guard let nonceHex = nonceHex else {
+            throw AttestationVerificationError("fresh nonce required with exporter binding")
+        }
+        let exporterHex = tlsExporter.hexString
+        // G6 relay closure is single-slot: the fresh nonce and the RFC 9266
+        // TLS exporter must both be committed, and they must be distinct.
+        if !nonces.contains(where: { constantTimeEquals($0, exporterHex) }) {
+            throw AttestationVerificationError("TLS exporter not present in JWT nonces")
+        }
+        if constantTimeEquals(nonceHex, exporterHex) {
+            throw AttestationVerificationError("fresh nonce must differ from TLS exporter binding")
+        }
     }
     
     var certSha = claims["tls_cert_sha256"] as? String ?? claims["workload_tls_cert_sha256"] as? String

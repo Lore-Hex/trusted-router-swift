@@ -4,6 +4,9 @@ import XCTest
 #if canImport(Security)
 import Security
 #endif
+#if canImport(Network)
+import Network
+#endif
 
 /// Builds a real RSA keypair via Security framework, signs a JWT with it,
 /// stitches together a JWKS pointing at the public half, and asserts
@@ -77,6 +80,124 @@ final class AttestationVerifyTests: XCTestCase {
         #endif
     }
 
+    func testTLSExporterBindingPassesWithFreshNonceAndExporter() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let freshNonce = String(repeating: "1", count: 64)
+        let exporter = Data((0..<exporterLength).map { UInt8($0) })
+        let jwt = try kit.makeJWT(claimOverrides: [
+            "eat_nonce": [freshNonce, exporter.hexString]
+        ])
+
+        let result = try await verifyGatewayAttestation(
+            document: Data(jwt.utf8),
+            policy: AttestationPolicy(audience: "quill-cloud"),
+            nonceHex: freshNonce,
+            tlsExporter: exporter,
+            jwks: kit.jwks
+        )
+
+        XCTAssertEqual(result.nonce, freshNonce)
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
+    func testTLSExporterBindingFailsWhenExporterAbsentFromNonceClaims() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let freshNonce = String(repeating: "2", count: 64)
+        let exporter = Data((0..<exporterLength).map { UInt8($0 + 1) })
+        let jwt = try kit.makeJWT(claimOverrides: [
+            "eat_nonce": [freshNonce]
+        ])
+
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8),
+                policy: AttestationPolicy(audience: "quill-cloud"),
+                nonceHex: freshNonce,
+                tlsExporter: exporter,
+                jwks: kit.jwks
+            )
+            XCTFail("expected exporter binding failure")
+        } catch let err as AttestationVerificationError {
+            XCTAssertTrue(err.message.contains("TLS exporter"))
+        }
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
+    func testTLSExporterBindingRequiresFreshNonceArgument() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let freshNonce = String(repeating: "3", count: 64)
+        let exporter = Data((0..<exporterLength).map { UInt8($0 + 2) })
+        let jwt = try kit.makeJWT(claimOverrides: [
+            "eat_nonce": [freshNonce, exporter.hexString]
+        ])
+
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8),
+                policy: AttestationPolicy(audience: "quill-cloud"),
+                tlsExporter: exporter,
+                jwks: kit.jwks
+            )
+            XCTFail("expected missing fresh nonce failure")
+        } catch let err as AttestationVerificationError {
+            XCTAssertTrue(err.message.contains("fresh nonce required"))
+        }
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
+    func testTLSExporterBindingRejectsSingleSlotRelayClosure() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let exporter = Data((0..<exporterLength).map { UInt8($0 + 3) })
+        let jwt = try kit.makeJWT(claimOverrides: [
+            "eat_nonce": [exporter.hexString]
+        ])
+
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8),
+                policy: AttestationPolicy(audience: "quill-cloud"),
+                nonceHex: exporter.hexString,
+                tlsExporter: exporter,
+                jwks: kit.jwks
+            )
+            XCTFail("expected relay-closure failure")
+        } catch let err as AttestationVerificationError {
+            XCTAssertTrue(err.message.contains("must differ"))
+        }
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
+    func testLiveVerifyGatewaySessionWhenEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["TR_LIVE"] == "1" else {
+            throw XCTSkip("Set TR_LIVE=1 to run the live G6 Network.framework session check")
+        }
+        #if canImport(Network)
+        let session = try await verifyGatewaySession(
+            baseURL: TrustedRouterConstants.defaultAPIBaseURL,
+            policy: AttestationPolicy()
+        )
+        print("G6 verified cert=\(session.attestation.certSha256) exporter=\(session.exporter.hexString.prefix(16))...")
+        let followUp = try await fetchAttestationAgain(session)
+        print("G6 pinned follow-up attestation bytes=\(followUp.count)")
+        session.connection.cancel()
+        XCTAssertFalse(followUp.isEmpty)
+        #else
+        throw XCTSkip("Network.framework not available")
+        #endif
+    }
+
     #if canImport(Security)
     // MARK: - Test keypair / JWS helper
 
@@ -85,11 +206,11 @@ final class AttestationVerifyTests: XCTestCase {
         let jwks: [String: Any]
         let certSha: String
 
-        func makeJWT() throws -> String {
+        func makeJWT(claimOverrides: [String: Any] = [:]) throws -> String {
             let header: [String: Any] = ["alg": "RS256", "typ": "JWT", "kid": "test-kid"]
             // Exp 1 hour from now; iss matches GCPIssuer so checkClaims passes.
             let now = Int(Date().timeIntervalSince1970)
-            let claims: [String: Any] = [
+            var claims: [String: Any] = [
                 "iss": GCPIssuer,
                 "aud": "quill-cloud",
                 "exp": now + 3600,
@@ -101,6 +222,9 @@ final class AttestationVerifyTests: XCTestCase {
                 ],
                 "tls_cert_sha256": certSha,
             ]
+            for (key, value) in claimOverrides {
+                claims[key] = value
+            }
             let hData = try JSONSerialization.data(withJSONObject: header)
             let pData = try JSONSerialization.data(withJSONObject: claims)
             let h64 = b64url(hData)
@@ -129,14 +253,42 @@ final class AttestationVerifyTests: XCTestCase {
     }
 
     private static func makeKeypairAndJWKS() throws -> JWTKit {
+        let privateKeyDERBase64 = """
+        MIIEowIBAAKCAQEAu4NqTDAzsaaYjwgQ7mZZFbVWHospEe/F6L3cOqKSVFGFhETz9uuGG0NOiKtq
+        sZGJ/2a+aQ8geUOugbssCn104rNK8YRdiXTVCgfK0dyFoYvxMyVuNC+qrfWcpaijToKhdbD/PbGO
+        98mJmjsksKeKf9o8rKn5cnBjT4fTr6K8TDF0g2wS9X0Dc+ZVY6oIHB0/SD9zxXoTMmuvXnrZLUkS
+        ztdhnBHON46hSUDrpH4o/EUN7eiWb8P9ynOpSFLUcDfcXyuBGEw48CTv0/KoyfLCfbwtPLCKmSrz
+        SLiyx74YnTO0WdDWIssnxzJU9WDv0qPC+tKIwDF9R5BPl0tgHjLuLwIDAQABAoIBAFYIDtqi2Oze
+        jys8m6wNmDzeBIOh/Hdmx6onheX/Fd0KxBPyIO6+k7ppcJxC7YJH0IU2KhGAp7kLZQLPkf7EHb8v
+        XKifvtyklmPyPEt5/nOmhcUeHMhjwE7tG/BjhX2tcI/TY9/12a71MCVrkkNcsy5CvkjH+ZNYXjAs
+        lOKF6xeXZRLerLYV9Ebs9kpnJQOaQtoQu+YUJ6qLSDyVT+66j1ZLFyUxZsoTaoyzITiuhaX5DD2z
+        Dw25K1B/upQTLa4pY24GX2ae51tq9J3U2gYwujfsgg+o/Ew7MAIuhDI9onmKOWIk7cKc7nR9cWR3
+        TmrUSRBQP+hFPNLuC9tbzdoJX7UCgYEA8pdZaHo6JIKZ6s88zYxo9OSpfFtNH8Y41p7OuCp9Uouf
+        EHt4HMf3D9kiP3Ep3cDlnBVE5UmnCxDyW5B2Rr9L6HO2jc3WES0ulQxUqV0LUEJurZt4oEkXxn87
+        o+SkuCwz5fovnV56f2nAJzYNyYuiK0AnNMGOd4j7hPGvGNNk5xMCgYEAxeC3r4/jk3azXmXGfTbq
+        LxUJMIX10StoiGvZMnW1PnYEzMOBOoSu+MQOh+7UI9NOS8DDj8SL1TBBqnQFSTlGfjdGVUpDXJMk
+        MXAnezioDFyTzVoGXEuB3/NGRJ24ibGpGwZ3IlYulaGAr/fXtAywRwRBpK0pcGEp44IfiQ8jM/UC
+        gYEAxkSymzRCbvKaz5F+1VQrt/NnHi8U0qJUc/ypYVXAxYU9hOAUpBk+sKI7XnSjzgzI3I95lphi
+        wSWhnvpr4JiadqqUCkOv8KvnxYOlciKMi5UwFg3aQc5bcy0r1mCZy7i81fprjgfYwGfy11lTXWUV
+        LpopMPH8+W9oehh5jiW/8ycCgYBQP2v+5Om0GgVwGPJAQY8DfRJ2/TzNkT8ZZDN3RUk1hYM4z2iP
+        JNQYytnhwreBt+YezpQAsALNeH6I8/hY08OE2EHLwQxEdN/OtN8uF7H/IWRHeWTu9Sg8fFpY5WW7
+        YbNk5GBYKn9F63NW6bouqJ6sjktYz2jozF7Chzjmyp7KKQKBgE4PJlenOn9VmDtWh5O6FODIAupE
+        ldFRxyg7ZE99hzh1A3WZxDdHajzkfexoOr5awwTM1PvpSIPGInu5Qq+D2MHRJi0u2ZDwFB89tVSC
+        6BTKXU7+sFLUbkKXUuF2pG8Iwd3pg6mSJQ5gzrqmqDxQdTGEoGWp3ZKvJyIvlZxFGNN1
+        """
+        guard let privateKeyDER = Data(base64Encoded: privateKeyDERBase64.filter { !$0.isWhitespace }) else {
+            throw NSError(domain: "JWTKit", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "invalid test private key"])
+        }
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
             kSecAttrKeySizeInBits as String: 2048,
         ]
         var error: Unmanaged<CFError>?
-        guard let priv = SecKeyCreateRandomKey(attrs as CFDictionary, &error) else {
+        guard let priv = SecKeyCreateWithData(privateKeyDER as CFData, attrs as CFDictionary, &error) else {
             throw NSError(domain: "JWTKit", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "keygen failed"])
+                          userInfo: [NSLocalizedDescriptionKey: "test private key import failed: \(error?.takeRetainedValue().localizedDescription ?? "unknown")"])
         }
         guard let pub = SecKeyCopyPublicKey(priv),
               let raw = SecKeyCopyExternalRepresentation(pub, &error) as Data?
