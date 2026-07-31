@@ -11,6 +11,12 @@ public enum TrustedRouterConstants {
     public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
     public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
     public static let defaultStatusURL = "https://status.trustedrouter.com/status.json"
+    public static let defaultRegionProbeTimeout: TimeInterval = 1.5
+    public static let regionBaseURLs = [
+        "https://api-us-central1.quillrouter.com/v1",
+        "https://api-us-east4.quillrouter.com/v1",
+        "https://api-europe-west4.quillrouter.com/v1"
+    ]
     public static let autoModel = "trustedrouter/auto"
     public static let fusionModel = "trustedrouter/fusion"
 
@@ -87,9 +93,12 @@ public struct TrustedRouterOptions {
     public var headers: [String: String]
     public var workspaceId: String?
     public var maxRetries: Int
-    /// The apex is a global load balancer; failover is handled server-side, so
-    /// the SDK re-requests the apex rather than pinning per-region hosts.
+    /// Retry eligible inference failures across the ranked regional gateways.
     public var regionalFailover: Bool
+    /// Nil enables affinity for URLSession.shared and disables it for an
+    /// injected session. Set explicitly to override that safe default.
+    public var regionalAffinity: Bool?
+    public var regionProbeTimeout: TimeInterval
 
     public init(
         apiKey: String? = nil,
@@ -99,7 +108,9 @@ public struct TrustedRouterOptions {
         headers: [String: String] = [:],
         workspaceId: String? = nil,
         maxRetries: Int = 2,
-        regionalFailover: Bool = true
+        regionalFailover: Bool = true,
+        regionalAffinity: Bool? = nil,
+        regionProbeTimeout: TimeInterval = TrustedRouterConstants.defaultRegionProbeTimeout
     ) {
         self.apiKey = apiKey
         self.baseUrl = baseUrl
@@ -109,6 +120,8 @@ public struct TrustedRouterOptions {
         self.workspaceId = workspaceId
         self.maxRetries = maxRetries
         self.regionalFailover = regionalFailover
+        self.regionalAffinity = regionalAffinity
+        self.regionProbeTimeout = regionProbeTimeout
     }
 }
 

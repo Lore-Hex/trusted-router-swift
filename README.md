@@ -47,9 +47,14 @@ By default, inference routes use `https://api.trustedrouter.com/v1`.
 Metadata, account, OAuth, billing, activity, provider, region, credit, and
 broadcast-destination routes use the control plane at
 `https://trustedrouter.com/v1`. Override inference routing with `baseUrl`, and
-override control routing with `controlBaseURL`. Regional failover re-requests
-the inference apex because `api.trustedrouter.com` is a global load balancer;
-the SDK no longer pins per-region hostnames.
+override control routing with `controlBaseURL`. On its first inference request,
+the default client probes the published US Central, US East, and Europe
+gateways in parallel, pins the lowest-latency healthy region, and preserves the
+same idempotency key when failing over to another region. Reuse one client to
+retain region affinity and `URLSession` pooling, reuse DNS results, and improve
+prompt-cache locality. Set `regionalAffinity: false` to keep using only the global apex. A
+custom `baseUrl` is never probed or rewritten; a custom `URLSession` defaults
+affinity off unless `regionalAffinity: true` is explicit.
 
 ### Fusion
 
@@ -78,7 +83,7 @@ call. `preset: "quality"` or `"budget"` selects a built-in panel.
 - **Streaming**: Native parsing of SSE using `AsyncThrowingStream`, with `URLSession.AsyncBytes` on Apple platforms and a Linux-safe byte stream fallback.
 - **Attestation Verification**: Verifies the Confidential Space JWT using `CryptoKit`/`Security`.
 - **Pure Swift**: No 3rd party dependencies. Operates seamlessly on macOS, iOS, tvOS, watchOS, and Linux with `FoundationNetworking`.
-- **Retries**: Implements transparent exponential backoff on `429` responses and apex failover retries for `502`/`503`/`504` or transport errors.
+- **Retries**: Implements transparent exponential backoff on `429` responses and regional failover for `502`/`503`/`504` or transport errors.
 
 ## Sign in with TrustedRouter
 

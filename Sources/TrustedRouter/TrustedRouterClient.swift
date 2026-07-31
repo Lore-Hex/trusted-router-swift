@@ -11,6 +11,109 @@ public enum TrustedRouterRequestPlane: Sendable {
     case control
 }
 
+private actor RegionalProbeRace {
+    private var remaining: Int
+    private var resolved = false
+    private var result: String?
+    private var waiter: CheckedContinuation<String?, Never>?
+
+    init(count: Int) {
+        self.remaining = count
+    }
+
+    func record(_ healthyBaseURL: String?) {
+        guard !resolved else { return }
+        if let healthyBaseURL {
+            resolve(healthyBaseURL)
+            return
+        }
+        remaining -= 1
+        if remaining == 0 {
+            resolve(nil)
+        }
+    }
+
+    func firstHealthy() async -> String? {
+        if resolved { return result }
+        return await withCheckedContinuation { continuation in
+            waiter = continuation
+        }
+    }
+
+    private func resolve(_ value: String?) {
+        resolved = true
+        result = value
+        waiter?.resume(returning: value)
+        waiter = nil
+    }
+}
+
+private actor RegionalEndpointSelector {
+    private let primaryBaseURL: String
+    private let urlSession: URLSession
+    private let timeout: TimeInterval
+    private var ranked: [String]?
+    private var rankingTask: Task<[String], Never>?
+
+    init(primaryBaseURL: String, urlSession: URLSession, timeout: TimeInterval) {
+        self.primaryBaseURL = primaryBaseURL
+        self.urlSession = urlSession
+        self.timeout = max(0.1, timeout)
+    }
+
+    func endpoints() async -> [String] {
+        if let ranked { return ranked }
+        if let rankingTask { return await rankingTask.value }
+        let task = Task { [primaryBaseURL, urlSession, timeout] in
+            var seen = Set<String>()
+            let candidates = (TrustedRouterConstants.regionBaseURLs + [primaryBaseURL]).filter {
+                seen.insert($0).inserted
+            }
+            let race = RegionalProbeRace(count: candidates.count)
+            for baseURL in candidates {
+                Task {
+                    guard let url = URL(
+                        string: baseURL.replacingOccurrences(
+                            of: "/v1$",
+                            with: "",
+                            options: .regularExpression
+                        ) + "/health"
+                    ) else {
+                        await race.record(nil)
+                        return
+                    }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "GET"
+                    request.timeoutInterval = timeout
+                    do {
+                        let (_, response) = try await urlSession.data(for: request)
+                        guard let http = response as? HTTPURLResponse,
+                              http.statusCode == 200 || http.statusCode == 401
+                        else {
+                            await race.record(nil)
+                            return
+                        }
+                        await race.record(baseURL)
+                    } catch {
+                        await race.record(nil)
+                    }
+                }
+            }
+            let winner = await race.firstHealthy()
+            guard let winner else { return [primaryBaseURL] }
+            seen.removeAll(keepingCapacity: true)
+            return ([winner, primaryBaseURL] + candidates).filter {
+                seen.insert($0).inserted
+            }
+        }
+        rankingTask = task
+        let result = await task.value
+        ranked = result
+        rankingTask = nil
+        return result
+    }
+}
+
 /// Thin, typed Swift client for the TrustedRouter gateway.
 ///
 /// Construct once with a `TrustedRouterOptions`, then call any of the
@@ -27,6 +130,7 @@ public final class TrustedRouter: Sendable {
     public let maxRetries: Int
     public let regionalFailover: Bool
     public let workspaceId: String?
+    private let regionalEndpointSelector: RegionalEndpointSelector?
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
         func trimTrailingSlashes(_ value: String) -> String {
@@ -45,6 +149,16 @@ public final class TrustedRouter: Sendable {
         self.maxRetries = max(0, options.maxRetries)
         self.regionalFailover = options.regionalFailover
         self.workspaceId = options.workspaceId
+        let affinityEnabled = options.regionalAffinity ?? (options.urlSession === URLSession.shared)
+        if options.baseUrl == nil && options.regionalFailover && affinityEnabled {
+            self.regionalEndpointSelector = RegionalEndpointSelector(
+                primaryBaseURL: self.baseUrl,
+                urlSession: options.urlSession,
+                timeout: options.regionProbeTimeout
+            )
+        } else {
+            self.regionalEndpointSelector = nil
+        }
     }
 
     /// User-Agent string sent on every request. Includes the SDK version
@@ -99,12 +213,21 @@ public final class TrustedRouter: Sendable {
         }
     }
 
-    private func requestURLString(path: String, plane: TrustedRouterRequestPlane) -> String {
+    private func inferenceBaseURLs() async -> [String] {
+        guard let regionalEndpointSelector else { return [baseUrl] }
+        return await regionalEndpointSelector.endpoints()
+    }
+
+    private func requestURLString(
+        path: String,
+        plane: TrustedRouterRequestPlane,
+        baseURLOverride: String? = nil
+    ) -> String {
         if let components = URLComponents(string: path), components.scheme != nil {
             return path
         }
         let relativePath = path.replacingOccurrences(of: "^/+", with: "", options: .regularExpression)
-        return "\(baseURL(for: plane))/\(relativePath)"
+        return "\(baseURLOverride ?? baseURL(for: plane))/\(relativePath)"
     }
 
     private func parseRetryAfter(_ response: HTTPURLResponse) -> Double? {
@@ -185,9 +308,20 @@ public final class TrustedRouter: Sendable {
         headers: [String: String]? = nil,
         body: Data? = nil,
         options: PerCallOptions = PerCallOptions(),
-        plane: TrustedRouterRequestPlane = .inference
+        plane: TrustedRouterRequestPlane = .inference,
+        _baseURLOverride: String? = nil
     ) async throws -> (Data, HTTPURLResponse) {
-        let urlString = requestURLString(path: path, plane: plane)
+        let selectedBaseURL: String?
+        if _baseURLOverride != nil || !usesInferenceBase(path: path, plane: plane) {
+            selectedBaseURL = _baseURLOverride
+        } else {
+            selectedBaseURL = await inferenceBaseURLs().first
+        }
+        let urlString = requestURLString(
+            path: path,
+            plane: plane,
+            baseURLOverride: selectedBaseURL
+        )
         guard let url = URL(string: urlString) else {
             throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
         }
@@ -231,9 +365,24 @@ public final class TrustedRouter: Sendable {
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference
     ) async throws -> (TrustedRouterByteStream, HTTPURLResponse) {
+        var effectiveOptions = options
+        if usesInferenceBase(path: path, plane: plane),
+           effectiveOptions.idempotencyKey == nil,
+           !["GET", "HEAD", "OPTIONS"].contains(method.uppercased()) {
+            effectiveOptions.idempotencyKey = "tr-req-\(UUID().uuidString)"
+        }
         var attempt = 0
+        var baseIndex = 0
+        let inferenceURLs = usesInferenceBase(path: path, plane: plane)
+            ? await inferenceBaseURLs()
+            : []
         while true {
-            let urlString = requestURLString(path: path, plane: plane)
+            let selectedBaseURL = inferenceURLs.isEmpty ? nil : inferenceURLs[baseIndex]
+            let urlString = requestURLString(
+                path: path,
+                plane: plane,
+                baseURLOverride: selectedBaseURL
+            )
             guard let url = URL(string: urlString) else {
                 throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
             }
@@ -241,16 +390,16 @@ public final class TrustedRouter: Sendable {
             var req = URLRequest(url: url)
             req.httpMethod = method
             req.httpBody = body
-            if let timeout = options.timeout {
+            if let timeout = effectiveOptions.timeout {
                 req.timeoutInterval = timeout
             }
 
             let reqHeaders = buildHeaders(
                 headers: headers,
-                extraHeaders: options.extraHeaders,
-                idempotencyKey: options.idempotencyKey,
-                apiKey: options.apiKey,
-                workspaceId: options.workspaceId
+                extraHeaders: effectiveOptions.extraHeaders,
+                idempotencyKey: effectiveOptions.idempotencyKey,
+                apiKey: effectiveOptions.apiKey,
+                workspaceId: effectiveOptions.workspaceId
             )
 
             for (k, v) in reqHeaders {
@@ -269,6 +418,9 @@ public final class TrustedRouter: Sendable {
                 }
                 if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
                     let retryAfter = parseRetryAfter(httpResponse)
+                    if isFailoverableStatus(httpResponse.statusCode), baseIndex < inferenceURLs.count - 1 {
+                        baseIndex += 1
+                    }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
                     attempt += 1
                     continue
@@ -281,6 +433,9 @@ public final class TrustedRouter: Sendable {
                 }
                 if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
                     let retryAfter = parseRetryAfter(httpResponse)
+                    if isFailoverableStatus(httpResponse.statusCode), baseIndex < inferenceURLs.count - 1 {
+                        baseIndex += 1
+                    }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
                     attempt += 1
                     continue
@@ -293,6 +448,7 @@ public final class TrustedRouter: Sendable {
                 if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
+                if baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
                 try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
                 attempt += 1
             }
@@ -334,6 +490,12 @@ public final class TrustedRouter: Sendable {
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference
     ) async throws -> T {
+        var effectiveOptions = options
+        if usesInferenceBase(path: path, plane: plane),
+           effectiveOptions.idempotencyKey == nil,
+           !["GET", "HEAD", "OPTIONS"].contains(method.uppercased()) {
+            effectiveOptions.idempotencyKey = "tr-req-\(UUID().uuidString)"
+        }
         var bodyData: Data? = nil
         if let body = body {
             if let data = body as? Data {
@@ -344,6 +506,10 @@ public final class TrustedRouter: Sendable {
         }
 
         var attempt = 0
+        var baseIndex = 0
+        let inferenceURLs = usesInferenceBase(path: path, plane: plane)
+            ? await inferenceBaseURLs()
+            : []
         while true {
             let data: Data
             let response: HTTPURLResponse
@@ -353,8 +519,9 @@ public final class TrustedRouter: Sendable {
                     path: path,
                     headers: headers,
                     body: bodyData,
-                    options: options,
-                    plane: plane
+                    options: effectiveOptions,
+                    plane: plane,
+                    _baseURLOverride: inferenceURLs.isEmpty ? nil : inferenceURLs[baseIndex]
                 )
             } catch let err as TrustedRouterError {
                 throw err
@@ -362,6 +529,7 @@ public final class TrustedRouter: Sendable {
                 if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
+                if baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
                 try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
                 attempt += 1
                 continue
@@ -370,6 +538,9 @@ public final class TrustedRouter: Sendable {
             if response.statusCode >= 400 {
                 if attempt < maxRetries && shouldRetry(statusCode: response.statusCode, path: path, plane: plane) {
                     let retryAfter = parseRetryAfter(response)
+                    if isFailoverableStatus(response.statusCode), baseIndex < inferenceURLs.count - 1 {
+                        baseIndex += 1
+                    }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
                     attempt += 1
                     continue

@@ -226,6 +226,140 @@ final class RetryAndClassificationTests: XCTestCase {
             XCTAssertEqual(msg, "plain string error")
         } catch { XCTFail("wrong error: \(error)") }
     }
+
+    func testRegionalAffinityPinsFastestAndFailsOverWithSameIdempotencyKey() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RegionalAffinityProtocol.self]
+        RegionalAffinityProtocol.reset()
+        let affinityRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 1,
+            regionalAffinity: true
+        ))
+        let _: EmptyResponse = try await affinityRouter.request(
+            method: "POST",
+            path: "/chat/completions",
+            body: ["model": "test", "messages": []]
+        )
+
+        XCTAssertEqual(RegionalAffinityProtocol.healthCount, 4)
+        XCTAssertEqual(RegionalAffinityProtocol.healthAtFirstInference.count, 1)
+        XCTAssertEqual(
+            RegionalAffinityProtocol.inferenceHosts.first,
+            RegionalAffinityProtocol.healthAtFirstInference.first
+        )
+        XCTAssertEqual(RegionalAffinityProtocol.inferenceHosts.count, 2)
+        XCTAssertNotEqual(
+            RegionalAffinityProtocol.inferenceHosts[0],
+            RegionalAffinityProtocol.inferenceHosts[1]
+        )
+        let idempotencyKeys = RegionalAffinityProtocol.idempotencyKeys
+        XCTAssertEqual(idempotencyKeys.count, 2)
+        XCTAssertTrue(idempotencyKeys[0]?.hasPrefix("tr-req-") == true)
+        XCTAssertEqual(idempotencyKeys[1], idempotencyKeys[0])
+    }
+
+    func testRegionalAffinityKeepsPinnedRegionForProvider429() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RegionalAffinityProtocol.self]
+        RegionalAffinityProtocol.reset(firstInferenceStatus: 429)
+        let affinityRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            maxRetries: 1,
+            regionalAffinity: true
+        ))
+
+        let _: EmptyResponse = try await affinityRouter.request(
+            method: "POST",
+            path: "/chat/completions",
+            body: ["model": "test", "messages": []]
+        )
+
+        XCTAssertEqual(
+            RegionalAffinityProtocol.inferenceHosts,
+            ["api-us-east4.quillrouter.com", "api-us-east4.quillrouter.com"]
+        )
+    }
+}
+
+private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var healthCount = 0
+    nonisolated(unsafe) static var completedHealthHosts: [String] = []
+    nonisolated(unsafe) static var healthAtFirstInference: [String] = []
+    nonisolated(unsafe) static var inferenceHosts: [String] = []
+    nonisolated(unsafe) static var idempotencyKeys: [String?] = []
+    nonisolated(unsafe) static var firstInferenceStatus = 503
+    private static let lock = NSLock()
+    private let lifecycleLock = NSLock()
+    private var stopped = false
+
+    static func reset(firstInferenceStatus: Int = 503) {
+        lock.lock()
+        defer { lock.unlock() }
+        healthCount = 0
+        completedHealthHosts = []
+        healthAtFirstInference = []
+        inferenceHosts = []
+        idempotencyKeys = []
+        self.firstInferenceStatus = firstInferenceStatus
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        let host = request.url?.host ?? ""
+        if request.url?.path == "/health" {
+            Self.lock.lock()
+            Self.healthCount += 1
+            Self.lock.unlock()
+            let delay: TimeInterval = host == "api-us-east4.quillrouter.com" ? 0.005 : 0.04
+            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
+                respondHealthIfActive(host: host)
+            }
+            return
+        }
+
+        Self.lock.lock()
+        if Self.inferenceHosts.isEmpty {
+            Self.healthAtFirstInference = Self.completedHealthHosts
+        }
+        Self.inferenceHosts.append(host)
+        Self.idempotencyKeys.append(request.value(forHTTPHeaderField: "idempotency-key"))
+        let status = Self.inferenceHosts.count == 1 ? Self.firstInferenceStatus : 200
+        Self.lock.unlock()
+        respond(status: status, body: status == 200 ? "{}" : #"{"error":{"message":"draining"}}"#)
+    }
+
+    private func respond(status: Int, body: String) {
+        let response = HTTPURLResponse(
+            url: request.url!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    private func respondHealthIfActive(host: String) {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        guard !stopped else { return }
+        Self.lock.lock()
+        Self.completedHealthHosts.append(host)
+        Self.lock.unlock()
+        respond(status: 200, body: #"{"status":"ok"}"#)
+    }
+
+    override func stopLoading() {
+        lifecycleLock.lock()
+        stopped = true
+        lifecycleLock.unlock()
+    }
 }
 
 /// URLProtocol that consumes a scripted list of responses, one per request.
