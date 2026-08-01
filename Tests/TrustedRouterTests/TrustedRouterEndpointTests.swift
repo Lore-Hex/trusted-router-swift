@@ -172,6 +172,33 @@ final class TrustedRouterEndpointTests: XCTestCase {
         XCTAssertEqual(result.choices.first?.message.content, "Hello world")
     }
 
+    func testChatCompletionsSendsHardProviderPreferences() async throws {
+        MockURLProtocol.requestHandler = { request in
+            let body = try requestBodyData(request)
+            let json = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: body) as? [String: Any]
+            )
+            XCTAssertEqual(
+                json["provider"] as? NSDictionary,
+                ProviderPreferences.confidential.value as NSDictionary
+            )
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            let data = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+            return (response, data.data(using: .utf8)!)
+        }
+
+        let result = try await router.chatCompletions(
+            messages: [["role": "user", "content": "Hi"]],
+            provider: .confidential
+        )
+        XCTAssertEqual(result.choices.first?.message.content, "ok")
+    }
+
     func testEmbeddings() async throws {
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.url?.host, "inference.test")
@@ -261,4 +288,24 @@ final class TrustedRouterEndpointTests: XCTestCase {
             XCTFail("Threw wrong error: \(error)")
         }
     }
+}
+
+private func requestBodyData(_ request: URLRequest) throws -> Data {
+    if let body = request.httpBody {
+        return body
+    }
+    let stream = try XCTUnwrap(request.httpBodyStream)
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        if count < 0 {
+            throw stream.streamError ?? URLError(.cannotDecodeRawData)
+        }
+        if count == 0 { break }
+        data.append(buffer, count: count)
+    }
+    return data
 }

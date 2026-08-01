@@ -80,6 +80,49 @@ final class AttestationVerifyTests: XCTestCase {
         #endif
     }
 
+    func testDebugWorkloadRequiresExplicitDevelopmentOptOut() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let jwt = try kit.makeJWT(claimOverrides: ["dbgstat": "enabled"])
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8),
+                policy: AttestationPolicy(),
+                jwks: kit.jwks
+            )
+            XCTFail("expected debug workload rejection")
+        } catch let error as AttestationVerificationError {
+            XCTAssertTrue(error.message.contains("disabled-since-boot"))
+        }
+        _ = try await verifyGatewayAttestation(
+            document: Data(jwt.utf8),
+            policy: AttestationPolicy(allowDebug: true),
+            jwks: kit.jwks
+        )
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
+    func testInvalidExpirationFailsClosed() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let jwt = try kit.makeJWT(claimOverrides: ["exp": "soon"])
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8),
+                policy: AttestationPolicy(),
+                jwks: kit.jwks
+            )
+            XCTFail("expected expiration rejection")
+        } catch let error as AttestationVerificationError {
+            XCTAssertTrue(error.message.contains("valid expiration"))
+        }
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
     func testTLSExporterBindingPassesWithFreshNonceAndExporter() async throws {
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
         let kit = try Self.makeKeypairAndJWKS()
@@ -214,6 +257,10 @@ final class AttestationVerifyTests: XCTestCase {
                 "iss": GCPIssuer,
                 "aud": "quill-cloud",
                 "exp": now + 3600,
+                "dbgstat": "disabled-since-boot",
+                "swname": "CONFIDENTIAL_SPACE",
+                "secboot": true,
+                "hwmodel": "GCP_AMD_SEV",
                 "submods": [
                     "container": [
                         "image_digest": "sha256:abc",
