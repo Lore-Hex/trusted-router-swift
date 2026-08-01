@@ -48,13 +48,15 @@ extension TrustedRouter {
         model: String = TrustedRouterConstants.autoModel,
         messages: [[String: Any]],
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> ChatCompletion {
         let stream: AsyncThrowingStream<ChatCompletionChunk, Error> = try await chatCompletionsChunks(
             model: model,
             messages: messages,
             options: options,
-            params: params
+            params: params,
+            provider: provider
         )
         
         var chunks: [ChatCompletionChunk] = []
@@ -69,9 +71,10 @@ extension TrustedRouter {
         model: String = TrustedRouterConstants.autoModel,
         messages: [[String: Any]],
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> AsyncThrowingStream<ChatCompletionChunk, Error> {
-        var body = params
+        var body = bodyWithProvider(params, provider: provider)
         body["model"] = model
         body["messages"] = messages
         body["stream"] = true
@@ -101,13 +104,15 @@ extension TrustedRouter {
         model: String = TrustedRouterConstants.autoModel,
         messages: [ChatMessage],
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> AsyncThrowingStream<ChatCompletionChunk, Error> {
         try await chatCompletionsChunks(
             model: model,
             messages: try messages.map(messageToDict),
             options: options,
-            params: params
+            params: params,
+            provider: provider
         )
     }
 
@@ -116,13 +121,15 @@ extension TrustedRouter {
         model: String = TrustedRouterConstants.autoModel,
         messages: [ChatMessage],
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> ChatCompletion {
         try await chatCompletions(
             model: model,
             messages: try messages.map(messageToDict),
             options: options,
-            params: params
+            params: params,
+            provider: provider
         )
     }
 
@@ -132,9 +139,16 @@ extension TrustedRouter {
         model: String = TrustedRouterConstants.autoModel,
         messages: [[String: Any]],
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> AsyncThrowingStream<String, Error> {
-        let chunks = try await chatCompletionsChunks(model: model, messages: messages, options: options, params: params)
+        let chunks = try await chatCompletionsChunks(
+            model: model,
+            messages: messages,
+            options: options,
+            params: params,
+            provider: provider
+        )
         return AsyncThrowingStream { continuation in
             Task {
                 do {
@@ -160,6 +174,7 @@ extension TrustedRouter {
      * `judgeModel` maps to the fusion `model` parameter.
      */
     public static func fusionTool(
+        enabled: Bool? = nil,
         analysisModels: [String]? = nil,
         judgeModel: String? = nil,
         selectionStrategy: String? = nil,
@@ -167,9 +182,12 @@ extension TrustedRouter {
         fallbackFinalModels: [String]? = nil,
         maxCompletionTokens: Int? = nil,
         maxToolCalls: Int? = nil,
-        preset: String? = nil
+        preset: String? = nil,
+        panelPrompt: String? = nil,
+        synthesisPrompt: String? = nil
     ) -> [String: Any] {
         var parameters: [String: Any] = [:]
+        if let enabled { parameters["enabled"] = enabled }
         if let preset = preset { parameters["preset"] = preset }
         if let analysisModels = analysisModels { parameters["analysis_models"] = analysisModels }
         if let judgeModel = judgeModel { parameters["model"] = judgeModel }
@@ -178,7 +196,103 @@ extension TrustedRouter {
         if let fallbackFinalModels = fallbackFinalModels { parameters["fallback_final_models"] = fallbackFinalModels }
         if let maxCompletionTokens = maxCompletionTokens { parameters["max_completion_tokens"] = maxCompletionTokens }
         if let maxToolCalls = maxToolCalls { parameters["max_tool_calls"] = maxToolCalls }
+        if let panelPrompt = panelPrompt { parameters["panel_prompt"] = panelPrompt }
+        if let synthesisPrompt = synthesisPrompt { parameters["synthesis_prompt"] = synthesisPrompt }
         return ["type": "trustedrouter:fusion", "parameters": parameters]
+    }
+
+    /// Build a `trustedrouter:advisor` tool spec.
+    public static func advisorTool(
+        enabled: Bool? = nil,
+        depth: Int? = nil,
+        workerModels: [String]? = nil,
+        advisorModels: [String]? = nil,
+        maxGetAdviceCalls: Int? = nil,
+        advisorMaxTokens: Int? = nil,
+        workerTimeoutMilliseconds: Int? = nil,
+        advisorTimeoutMilliseconds: Int? = nil,
+        autoInitialAdvice: Bool? = nil
+    ) -> [String: Any] {
+        var parameters: [String: Any] = [:]
+        if let enabled { parameters["enabled"] = enabled }
+        if let depth { parameters["depth"] = depth }
+        if let workerModels { parameters["worker_models"] = workerModels }
+        if let advisorModels { parameters["advisor_models"] = advisorModels }
+        if let maxGetAdviceCalls { parameters["max_get_advice_calls"] = maxGetAdviceCalls }
+        if let advisorMaxTokens { parameters["advisor_max_tokens"] = advisorMaxTokens }
+        if let workerTimeoutMilliseconds { parameters["worker_timeout_ms"] = workerTimeoutMilliseconds }
+        if let advisorTimeoutMilliseconds { parameters["advisor_timeout_ms"] = advisorTimeoutMilliseconds }
+        if let autoInitialAdvice { parameters["auto_initial_advice"] = autoInitialAdvice }
+        return ["type": "trustedrouter:advisor", "parameters": parameters]
+    }
+
+    /// Build a `trustedrouter:selector` tool spec.
+    public static func selectorTool(
+        enabled: Bool? = nil,
+        analysisModels: [String]? = nil,
+        selectorModels: [String]? = nil,
+        selectorPrompt: String? = nil,
+        maxCompletionTokens: Int? = nil
+    ) -> [String: Any] {
+        var parameters: [String: Any] = [:]
+        if let enabled { parameters["enabled"] = enabled }
+        if let analysisModels { parameters["analysis_models"] = analysisModels }
+        if let selectorModels { parameters["selector_models"] = selectorModels }
+        if let selectorPrompt { parameters["selector_prompt"] = selectorPrompt }
+        if let maxCompletionTokens { parameters["max_completion_tokens"] = maxCompletionTokens }
+        return ["type": "trustedrouter:selector", "parameters": parameters]
+    }
+
+    /// Build a `trustedrouter:mapreduce` tool spec.
+    public static func mapReduceTool(
+        enabled: Bool? = nil,
+        mapperModels: [String]? = nil,
+        parallelModels: [String]? = nil,
+        reducerModels: [String]? = nil,
+        maxParts: Int? = nil,
+        mapperPrompt: String? = nil,
+        parallelPrompt: String? = nil,
+        reducerPrompt: String? = nil,
+        maxCompletionTokens: Int? = nil
+    ) -> [String: Any] {
+        var parameters: [String: Any] = [:]
+        if let enabled { parameters["enabled"] = enabled }
+        if let mapperModels { parameters["mapper_models"] = mapperModels }
+        if let parallelModels { parameters["parallel_models"] = parallelModels }
+        if let reducerModels { parameters["reducer_models"] = reducerModels }
+        if let maxParts { parameters["max_parts"] = maxParts }
+        if let mapperPrompt { parameters["mapper_prompt"] = mapperPrompt }
+        if let parallelPrompt { parameters["parallel_prompt"] = parallelPrompt }
+        if let reducerPrompt { parameters["reducer_prompt"] = reducerPrompt }
+        if let maxCompletionTokens { parameters["max_completion_tokens"] = maxCompletionTokens }
+        return ["type": "trustedrouter:mapreduce", "parameters": parameters]
+    }
+
+    /// Build a `trustedrouter:subagent` tool spec.
+    public static func subagentTool(
+        enabled: Bool? = nil,
+        controllerModel: String? = nil,
+        model: String? = nil,
+        instructions: String? = nil,
+        depth: Int? = nil,
+        maxSubagentCalls: Int? = nil,
+        maxCompletionTokens: Int? = nil,
+        temperature: Double? = nil,
+        reasoning: Any? = nil,
+        tools: [[String: Any]]? = nil
+    ) -> [String: Any] {
+        var parameters: [String: Any] = [:]
+        if let enabled { parameters["enabled"] = enabled }
+        if let controllerModel { parameters["controller_model"] = controllerModel }
+        if let model { parameters["model"] = model }
+        if let instructions { parameters["instructions"] = instructions }
+        if let depth { parameters["depth"] = depth }
+        if let maxSubagentCalls { parameters["max_subagent_calls"] = maxSubagentCalls }
+        if let maxCompletionTokens { parameters["max_completion_tokens"] = maxCompletionTokens }
+        if let temperature { parameters["temperature"] = temperature }
+        if let reasoning { parameters["reasoning"] = reasoning }
+        if let tools { parameters["tools"] = tools }
+        return ["type": "trustedrouter:subagent", "parameters": parameters]
     }
 
     /**
@@ -198,7 +312,8 @@ extension TrustedRouter {
         maxToolCalls: Int? = nil,
         preset: String? = nil,
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> ChatCompletion {
         var body = params
         var tools = (body["tools"] as? [[String: Any]]) ?? []
@@ -217,7 +332,8 @@ extension TrustedRouter {
             model: TrustedRouterConstants.fusionModel,
             messages: messages,
             options: options,
-            params: body
+            params: body,
+            provider: provider
         )
     }
 
@@ -233,7 +349,8 @@ extension TrustedRouter {
         maxToolCalls: Int? = nil,
         preset: String? = nil,
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> ChatCompletion {
         try await fusion(
             messages: try messages.map(messageToDict),
@@ -246,7 +363,8 @@ extension TrustedRouter {
             maxToolCalls: maxToolCalls,
             preset: preset,
             options: options,
-            params: params
+            params: params,
+            provider: provider
         )
     }
 
@@ -258,9 +376,13 @@ extension TrustedRouter {
         encodingFormat: String? = nil,
         dimensions: Int? = nil,
         user: String? = nil,
-        options: PerCallOptions = PerCallOptions()
+        options: PerCallOptions = PerCallOptions(),
+        provider: ProviderPreferences? = nil
     ) async throws -> EmbeddingResponse {
-        var body: [String: Any] = ["model": model, "input": input]
+        var body = bodyWithProvider(
+            ["model": model, "input": input],
+            provider: provider
+        )
         if let encodingFormat = encodingFormat { body["encoding_format"] = encodingFormat }
         if let dimensions = dimensions { body["dimensions"] = dimensions }
         if let user = user { body["user"] = user }
@@ -273,9 +395,10 @@ extension TrustedRouter {
         messages: [[String: Any]],
         maxTokens: Int = 1024,
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> MessageResponse {
-        var body = params
+        var body = bodyWithProvider(params, provider: provider)
         body["model"] = model
         body["messages"] = messages
         body["max_tokens"] = maxTokens
@@ -288,9 +411,10 @@ extension TrustedRouter {
         input: Any,
         instructions: String? = nil,
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> ResponseObject {
-        var body = params
+        var body = bodyWithProvider(params, provider: provider)
         body["model"] = model
         body["input"] = input
         body["stream"] = false
@@ -307,9 +431,10 @@ extension TrustedRouter {
         input: Any,
         instructions: String? = nil,
         options: PerCallOptions = PerCallOptions(),
-        params: [String: Any] = [:]
+        params: [String: Any] = [:],
+        provider: ProviderPreferences? = nil
     ) async throws -> AsyncThrowingStream<[String: Any], Error> {
-        var body = params
+        var body = bodyWithProvider(params, provider: provider)
         body["model"] = model
         body["input"] = input
         body["stream"] = true
@@ -543,6 +668,17 @@ extension TrustedRouter {
             usage: nil
         )
     }
+}
+
+private func bodyWithProvider(
+    _ params: [String: Any],
+    provider: ProviderPreferences?
+) -> [String: Any] {
+    var body = params
+    if let provider {
+        body["provider"] = provider.value
+    }
+    return body
 }
 
 private func modelsPath(

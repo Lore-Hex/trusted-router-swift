@@ -9,7 +9,7 @@ This is a pure Swift, zero-dependency client SDK for the TrustedRouter gateway. 
 Add this to your `Package.swift` dependencies:
 
 ```swift
-.package(url: "https://github.com/jperla/trusted-router-swift.git", from: "0.4.1")
+.package(url: "https://github.com/Lore-Hex/trusted-router-swift.git", from: "0.6.0")
 ```
 
 Then add `"TrustedRouter"` to your target's dependencies.
@@ -76,6 +76,25 @@ print(answer.choices.first?.message.content ?? "")
 
 Or build the spec with `TrustedRouter.fusionTool(...)` and attach it to any chat
 call. `preset: "quality"` or `"budget"` selects a built-in panel.
+
+### Privacy and orchestration primitives
+
+Use `ProviderPreferences` when privacy or US provider jurisdiction must be a
+hard requirement, including with an explicit model. Use
+`TrustedRouterConstants.euModel` for the EU-focused routing pool:
+
+```swift
+let response = try await client.chatCompletions(
+    model: "z-ai/glm-5.2",
+    messages: [.user("Review this contract.")],
+    provider: .confidential
+)
+```
+
+Stable constants cover ZDR, E2E/confidential, EU, US, Socrates, Prometheus,
+Zeus, and Athena. Custom orchestration uses the same five atomic builders as
+the other SDKs: `fusionTool`, `advisorTool`, `selectorTool`, `mapReduceTool`,
+and `subagentTool`.
 
 ## Features
 

@@ -6,7 +6,7 @@ import FoundationNetworking
 
 /// Compile-time constants for the SDK: version, default endpoints, and models.
 public enum TrustedRouterConstants {
-    public static let version = "0.4.1"
+    public static let version = "0.6.0"
     public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
     public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
     public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
@@ -18,7 +18,22 @@ public enum TrustedRouterConstants {
         "https://api-europe-west4.quillrouter.com/v1"
     ]
     public static let autoModel = "trustedrouter/auto"
+    public static let fastModel = "trustedrouter/fast"
+    public static let zdrModel = "trustedrouter/zdr"
+    public static let e2eModel = "trustedrouter/e2e"
+    public static let confidentialModel = "trustedrouter/confidential"
+    public static let euModel = "trustedrouter/eu"
+    public static let usModel = "trustedrouter/us"
     public static let fusionModel = "trustedrouter/fusion"
+    public static let synthModel = "trustedrouter/synth"
+    public static let advisorModel = "trustedrouter/advisor"
+    public static let selectorModel = "trustedrouter/selector"
+    public static let mapReduceModel = "trustedrouter/mapreduce"
+    public static let subagentModel = "trustedrouter/subagent"
+    public static let socratesModel = "trustedrouter/socrates-1.1"
+    public static let prometheusModel = "trustedrouter/prometheus-2.0"
+    public static let zeusModel = "trustedrouter/zeus-1.0"
+    public static let athenaModel = "trustedrouter/athena"
 
     /// Recommended panel + judge fallback chain for maximum willingness to
     /// answer — the configuration that answered all 30 PrometheusBench unsafe
@@ -58,6 +73,30 @@ public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
     case invalidResponse(String)
 
     public var errorDescription: String? { description }
+
+    /// Routing layer supplied by the actionable API error envelope.
+    public var layer: String? { attribution("layer") }
+    /// Gateway or provider error source supplied by the API.
+    public var source: String? { attribution("source") }
+    /// Attempted provider when supplied by the gateway.
+    public var provider: String? { attribution("provider") }
+    /// Request identifier for metadata-log correlation.
+    public var requestID: String? { attribution("request_id") }
+
+    private func attribution(_ key: String) -> String? {
+        let payload: [String: Any]?
+        switch self {
+        case let .badRequest(_, _, value), let .authentication(_, _, value),
+             let .permissionDenied(_, _, value), let .notFound(_, _, value),
+             let .endpointNotSupported(_, _, value), let .generic(_, _, value),
+             let .rateLimit(_, _, value, _):
+            payload = value
+        case .internalError, .invalidResponse:
+            payload = nil
+        }
+        let detail = (payload?["error"] as? [String: Any]) ?? payload
+        return detail?[key] as? String
+    }
     public var description: String {
         switch self {
         case let .badRequest(statusCode, message, _),
@@ -76,6 +115,54 @@ public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
             return message
         }
     }
+}
+
+/// JSON-serializable provider routing, privacy, and pricing preferences.
+public struct ProviderPreferences {
+    public let value: [String: Any]
+
+    public init(
+        order: [String]? = nil,
+        only: [String]? = nil,
+        ignore: [String]? = nil,
+        sort: String? = nil,
+        allowFallbacks: Bool? = nil,
+        requireParameters: Bool? = nil,
+        dataCollection: String? = nil,
+        minimumPrivacy: String? = nil,
+        jurisdiction: String? = nil,
+        usage: String? = nil,
+        quantizations: [String]? = nil,
+        maxPrice: [String: Any]? = nil
+    ) {
+        var result: [String: Any] = [:]
+        if let order { result["order"] = order }
+        if let only { result["only"] = only }
+        if let ignore { result["ignore"] = ignore }
+        if let sort { result["sort"] = sort }
+        if let allowFallbacks { result["allow_fallbacks"] = allowFallbacks }
+        if let requireParameters { result["require_parameters"] = requireParameters }
+        if let dataCollection { result["data_collection"] = dataCollection }
+        if let minimumPrivacy { result["min_privacy"] = minimumPrivacy }
+        if let jurisdiction { result["jurisdiction"] = jurisdiction }
+        if let usage { result["usage"] = usage }
+        if let quantizations { result["quantizations"] = quantizations }
+        if let maxPrice { result["max_price"] = maxPrice }
+        value = result
+    }
+
+    public static var zeroDataRetention: ProviderPreferences {
+        ProviderPreferences(dataCollection: "deny", minimumPrivacy: "zdr")
+    }
+
+    public static var confidential: ProviderPreferences {
+        ProviderPreferences(dataCollection: "deny", minimumPrivacy: "confidential")
+    }
+
+    public static var unitedStates: ProviderPreferences {
+        ProviderPreferences(jurisdiction: "us")
+    }
+
 }
 
 /// Configuration for a `TrustedRouter` client. Construct with `init(...)`,

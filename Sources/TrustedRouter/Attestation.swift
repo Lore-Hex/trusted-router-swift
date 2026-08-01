@@ -66,17 +66,20 @@ public struct AttestationPolicy: Sendable {
     public var certSha256: String?
     public var imageDigest: String?
     public var imageReference: String?
+    public var allowDebug: Bool
 
     public init(
         audience: String = "quill-cloud",
         certSha256: String? = nil,
         imageDigest: String? = nil,
-        imageReference: String? = nil
+        imageReference: String? = nil,
+        allowDebug: Bool = false
     ) {
         self.audience = audience
         self.certSha256 = certSha256
         self.imageDigest = imageDigest
         self.imageReference = imageReference
+        self.allowDebug = allowDebug
     }
 }
 
@@ -289,11 +292,28 @@ public func verifyGatewayAttestation(
 
 private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonceHex: String?, tlsCertDer: Data?, tlsExporter: Data?) throws -> GatewayAttestation {
     let now = Int(Date().timeIntervalSince1970)
-    if let exp = claims["exp"] as? Int, exp <= now {
+    guard let exp = claims["exp"] as? Int else {
+        throw AttestationVerificationError("JWT is missing a valid expiration")
+    }
+    if exp <= now {
         throw AttestationVerificationError("JWT expired at \(exp) (now=\(now))")
     }
-    if let iss = claims["iss"] as? String, iss != GCPIssuer {
-        throw AttestationVerificationError("unexpected issuer \(iss); expected \(GCPIssuer)")
+    guard let iss = claims["iss"] as? String, iss == GCPIssuer else {
+        let actual = claims["iss"] as? String ?? "missing"
+        throw AttestationVerificationError("unexpected issuer \(actual); expected \(GCPIssuer)")
+    }
+    if !policy.allowDebug && (claims["dbgstat"] as? String)?.lowercased() != "disabled-since-boot" {
+        throw AttestationVerificationError("debug Confidential Space workload must report disabled-since-boot")
+    }
+    if claims["swname"] as? String != "CONFIDENTIAL_SPACE" {
+        throw AttestationVerificationError("attested workload is not running Confidential Space")
+    }
+    if claims["secboot"] as? Bool != true {
+        throw AttestationVerificationError("attested workload does not report Secure Boot")
+    }
+    let hardware = claims["hwmodel"] as? String ?? "missing"
+    if !["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"].contains(hardware) {
+        throw AttestationVerificationError("unsupported confidential hardware model \(hardware)")
     }
     
     var audList: [String] = []
@@ -391,8 +411,8 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
         imageDigest: imageDigest,
         imageReference: imageReference,
         nonce: nonceMatch,
-        expiresAt: claims["exp"] as? Int,
-        issuer: claims["iss"] as? String,
+        expiresAt: exp,
+        issuer: iss,
         audience: policy.audience,
         rawClaims: claims.mapValues { SendableValue.from(any: $0) }
     )
