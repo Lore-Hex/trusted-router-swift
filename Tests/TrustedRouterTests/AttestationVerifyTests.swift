@@ -104,6 +104,29 @@ final class AttestationVerifyTests: XCTestCase {
         #endif
     }
 
+    func testPublishedRolloutDigestSetAcceptsCurrentWorkload() async throws {
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let kit = try Self.makeKeypairAndJWKS()
+        let jwt = try kit.makeJWT()
+        let result = try await verifyGatewayAttestation(
+            document: Data(jwt.utf8),
+            policy: AttestationPolicy(
+                imageDigest: "sha256:new",
+                imageDigests: ["sha256:abc", "sha256:new"],
+                imageReference: "registry.example/new:release",
+                imageReferences: [
+                    "test/image:1",
+                    "registry.example/new:release"
+                ]
+            ),
+            jwks: kit.jwks
+        )
+        XCTAssertEqual(result.imageDigest, "sha256:abc")
+        #else
+        throw XCTSkip("Security framework not available")
+        #endif
+    }
+
     func testInvalidExpirationFailsClosed() async throws {
         #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
         let kit = try Self.makeKeypairAndJWKS()

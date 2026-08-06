@@ -65,20 +65,26 @@ public struct AttestationPolicy: Sendable {
     public var audience: String
     public var certSha256: String?
     public var imageDigest: String?
+    public var imageDigests: [String]
     public var imageReference: String?
+    public var imageReferences: [String]
     public var allowDebug: Bool
 
     public init(
         audience: String = "quill-cloud",
         certSha256: String? = nil,
         imageDigest: String? = nil,
+        imageDigests: [String] = [],
         imageReference: String? = nil,
+        imageReferences: [String] = [],
         allowDebug: Bool = false
     ) {
         self.audience = audience
         self.certSha256 = certSha256
         self.imageDigest = imageDigest
+        self.imageDigests = imageDigests
         self.imageReference = imageReference
+        self.imageReferences = imageReferences
         self.allowDebug = allowDebug
     }
 }
@@ -170,11 +176,19 @@ public func policyFromTrustRelease(
     } else {
         rel = try await fetchTrustRelease(trustUrl: trustReleaseUrl, urlSession: urlSession)
     }
+    let imageDigest = rel["image_digest"] as? String
+    let publishedDigests = (rel["accepted_image_digests"] as? [String])?
+        .filter { !$0.isEmpty } ?? []
+    let imageReference = rel["image_reference"] as? String
+    let publishedReferences = (rel["accepted_image_references"] as? [String])?
+        .filter { !$0.isEmpty } ?? []
     return AttestationPolicy(
         audience: audience,
         certSha256: certSha256,
-        imageDigest: rel["image_digest"] as? String,
-        imageReference: rel["image_reference"] as? String
+        imageDigest: imageDigest,
+        imageDigests: publishedDigests.isEmpty ? imageDigest.map { [$0] } ?? [] : publishedDigests,
+        imageReference: imageReference,
+        imageReferences: publishedReferences.isEmpty ? imageReference.map { [$0] } ?? [] : publishedReferences
     )
 }
 
@@ -333,11 +347,17 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
         imageReference = container["image_reference"] as? String ?? ""
     }
     
-    if let pDigest = policy.imageDigest, imageDigest != pDigest {
-        throw AttestationVerificationError("image_digest mismatch: workload=\(imageDigest), policy=\(pDigest)")
+    let acceptedImageDigests = policy.imageDigests.isEmpty
+        ? policy.imageDigest.map { [$0] } ?? []
+        : policy.imageDigests
+    if !acceptedImageDigests.isEmpty && !acceptedImageDigests.contains(imageDigest) {
+        throw AttestationVerificationError("image_digest mismatch: workload=\(imageDigest), policy=\(acceptedImageDigests)")
     }
-    if let pRef = policy.imageReference, imageReference != pRef {
-        throw AttestationVerificationError("image_reference mismatch: workload=\(imageReference), policy=\(pRef)")
+    let acceptedImageReferences = policy.imageReferences.isEmpty
+        ? policy.imageReference.map { [$0] } ?? []
+        : policy.imageReferences
+    if !acceptedImageReferences.isEmpty && !acceptedImageReferences.contains(imageReference) {
+        throw AttestationVerificationError("image_reference mismatch: workload=\(imageReference), policy=\(acceptedImageReferences)")
     }
     
     var nonces: [String] = []
