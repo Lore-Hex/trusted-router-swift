@@ -39,7 +39,7 @@ final class StreamingErrorTests: XCTestCase {
         }
     }
 
-    func testChatCompletionsChunksRetriesFailoverableStatusAgainstApex() async throws {
+    func testChatCompletionsChunksMovesFailoverableStatusToAnAliasDomain() async throws {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [StreamSequenceProtocol.self]
         StreamSequenceProtocol.reset()
@@ -63,7 +63,9 @@ final class StreamingErrorTests: XCTestCase {
         }
 
         XCTAssertEqual(StreamSequenceProtocol.served, 2)
-        XCTAssertEqual(StreamSequenceProtocol.requestedHosts, ["api.trustedrouter.com", "api.trustedrouter.com"])
+        // Streaming shares the candidate list, so a 503 on the open moves the
+        // stream to another domain instead of reopening against the same one.
+        XCTAssertEqual(StreamSequenceProtocol.requestedHosts, ["api.trustedrouter.com", "api.allyrouter.com"])
         XCTAssertEqual(chunks.first?.choices.first?.delta?.content, "ok")
     }
 

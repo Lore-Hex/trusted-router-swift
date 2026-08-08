@@ -11,6 +11,38 @@ public enum TrustedRouterRequestPlane: Sendable {
     case control
 }
 
+func trimTrailingSlashes(_ value: String) -> String {
+    var trimmed = value
+    while trimmed.hasSuffix("/") { trimmed.removeLast() }
+    return trimmed
+}
+
+/// The primary API host followed by its alias domains.
+///
+/// This list must have MORE THAN ONE entry or failover cannot engage at all:
+/// every advance in the request loops is guarded by
+/// `baseIndex < inferenceURLs.count - 1`, so a single-entry list makes the
+/// transport-error and 502/503/504 handling unreachable. That was the state
+/// for any client with an injected `URLSession`, which is every client that
+/// configures its own caching, timeouts, or delegate — the regional selector
+/// is disabled for those, and the fallback was a one-element list.
+///
+/// Aliases are appended only for the default API host. A caller who passed
+/// their own base URL — a private deployment, a test server, a regional pin —
+/// gets exactly that; silently redirecting that traffic to a public alias
+/// would be worse than failing.
+func aliasFailoverURLs(primaryBaseURL: String, regionalFailover: Bool) -> [String] {
+    // Both sides go through the same normalization: comparing a stored base
+    // URL against the raw constant is how this silently degrades to one entry.
+    let primary = trimTrailingSlashes(primaryBaseURL)
+    guard regionalFailover,
+          primary == trimTrailingSlashes(TrustedRouterConstants.defaultAPIBaseURL)
+    else { return [primary] }
+    var seen = Set<String>()
+    return ([primary] + TrustedRouterConstants.aliasAPIBaseURLs.map(trimTrailingSlashes))
+        .filter { seen.insert($0).inserted }
+}
+
 private actor RegionalProbeRace {
     private var remaining: Int
     private var resolved = false
@@ -48,7 +80,7 @@ private actor RegionalProbeRace {
     }
 }
 
-private actor RegionalEndpointSelector {
+actor RegionalEndpointSelector {
     private let primaryBaseURL: String
     private let urlSession: URLSession
     private let timeout: TimeInterval
@@ -100,9 +132,15 @@ private actor RegionalEndpointSelector {
                 }
             }
             let winner = await race.firstHealthy()
-            guard let winner else { return [primaryBaseURL] }
+            // No region answering is precisely when the aliases matter, so this
+            // must not collapse to a single host — that would delete failover
+            // at the exact moment it is needed.
+            let aliases = aliasFailoverURLs(
+                primaryBaseURL: primaryBaseURL, regionalFailover: true
+            )
+            guard let winner else { return aliases }
             seen.removeAll(keepingCapacity: true)
-            return ([winner, primaryBaseURL] + candidates).filter {
+            return ([winner, primaryBaseURL] + candidates + aliases).filter {
                 seen.insert($0).inserted
             }
         }
@@ -130,15 +168,12 @@ public final class TrustedRouter: Sendable {
     public let maxRetries: Int
     public let regionalFailover: Bool
     public let workspaceId: String?
-    private let regionalEndpointSelector: RegionalEndpointSelector?
+    let regionalEndpointSelector: RegionalEndpointSelector?
+    /// The inference hosts used when the regional selector is off: the primary
+    /// followed by its alias domains.
+    let aliasBaseURLs: [String]
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
-        func trimTrailingSlashes(_ value: String) -> String {
-            var trimmed = value
-            while trimmed.hasSuffix("/") { trimmed.removeLast() }
-            return trimmed
-        }
-
         self.apiKey = options.apiKey
         // Strip any trailing slashes so the path-join in `rawRequest` doesn't
         // emit a double-slash URL.
@@ -149,6 +184,11 @@ public final class TrustedRouter: Sendable {
         self.maxRetries = max(0, options.maxRetries)
         self.regionalFailover = options.regionalFailover
         self.workspaceId = options.workspaceId
+        self.aliasBaseURLs = aliasFailoverURLs(
+            primaryBaseURL: self.baseUrl,
+            // An explicit base URL is a pin: honour it even on the default host.
+            regionalFailover: options.regionalFailover && options.baseUrl == nil
+        )
         let affinityEnabled = options.regionalAffinity ?? (options.urlSession === URLSession.shared)
         if options.baseUrl == nil && options.regionalFailover && affinityEnabled {
             self.regionalEndpointSelector = RegionalEndpointSelector(
@@ -214,7 +254,7 @@ public final class TrustedRouter: Sendable {
     }
 
     private func inferenceBaseURLs() async -> [String] {
-        guard let regionalEndpointSelector else { return [baseUrl] }
+        guard let regionalEndpointSelector else { return aliasBaseURLs }
         return await regionalEndpointSelector.endpoints()
     }
 

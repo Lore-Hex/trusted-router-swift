@@ -95,7 +95,7 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func testFailoverableStatusRetriesSameApexAndCanSucceed() async throws {
+    func testFailoverableStatusMovesToAnotherDomainAndCanSucceed() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SequenceProtocol.self]
         SequenceProtocol.reset()
@@ -112,9 +112,12 @@ final class RetryAndClassificationTests: XCTestCase {
         ]
         let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(SequenceProtocol.served, 3, "should have made all three attempts")
+        // Previously this asserted all three attempts hit api.trustedrouter.com
+        // and called that failover. Re-sending to the host that just returned
+        // 503 is not failover; it is the same request three times.
         XCTAssertEqual(
             SequenceProtocol.requestedHosts,
-            ["api.trustedrouter.com", "api.trustedrouter.com", "api.trustedrouter.com"]
+            ["api.trustedrouter.com", "api.allyrouter.com", "api.uptimerouter.com"]
         )
     }
 
@@ -158,7 +161,7 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func testTransportErrorRetriesInferenceApexWhenRegionalFailoverEnabled() async throws {
+    func testTransportErrorMovesToAnAliasDomainWhenRegionalFailoverEnabled() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TransportSequenceProtocol.self]
         TransportSequenceProtocol.reset()
@@ -174,9 +177,12 @@ final class RetryAndClassificationTests: XCTestCase {
         ]
         let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(TransportSequenceProtocol.served, 2)
+        // A connection failure is the case a dead domain actually produces, and
+        // it is the one where retrying the same name is guaranteed to fail
+        // again. This previously asserted exactly that as correct.
         XCTAssertEqual(
             TransportSequenceProtocol.requestedHosts,
-            ["api.trustedrouter.com", "api.trustedrouter.com"]
+            ["api.trustedrouter.com", "api.allyrouter.com"]
         )
     }
 
