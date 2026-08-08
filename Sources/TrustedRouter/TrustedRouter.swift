@@ -17,6 +17,22 @@ public enum TrustedRouterConstants {
         "https://api-us-east4.quillrouter.com/v1",
         "https://api-europe-west4.quillrouter.com/v1"
     ]
+    /// Exact aliases of ``defaultAPIBaseURL``, on separate domains served by
+    /// separate DNS providers (trustedrouter.com from Google Cloud DNS, these
+    /// two from Route 53).
+    ///
+    /// The domain is a single point of failure sitting above the whole
+    /// deployment: a zone that stops answering, a registrar lock, or a resolver
+    /// handing out a stale record takes the API down no matter how many clouds
+    /// are behind it. These names resolve to the same attested enclaves, so
+    /// falling back to one costs nothing and is invisible to callers.
+    ///
+    /// They sit at the TAIL of the candidate list, after the regional
+    /// endpoints, so a healthy deployment never uses them.
+    public static let aliasAPIBaseURLs = [
+        "https://api.allyrouter.com/v1",
+        "https://api.uptimerouter.com/v1"
+    ]
     public static let autoModel = "trustedrouter/auto"
     public static let fastModel = "trustedrouter/fast"
     public static let zdrModel = "trustedrouter/zdr"

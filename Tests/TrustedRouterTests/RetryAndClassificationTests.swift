@@ -95,7 +95,7 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func testFailoverableStatusRetriesSameApexAndCanSucceed() async throws {
+    func testFailoverableStatusMovesToAnotherDomainAndCanSucceed() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SequenceProtocol.self]
         SequenceProtocol.reset()
@@ -112,9 +112,12 @@ final class RetryAndClassificationTests: XCTestCase {
         ]
         let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(SequenceProtocol.served, 3, "should have made all three attempts")
+        // Previously this asserted all three attempts hit api.trustedrouter.com
+        // and called that failover. Re-sending to the host that just returned
+        // 503 is not failover; it is the same request three times.
         XCTAssertEqual(
             SequenceProtocol.requestedHosts,
-            ["api.trustedrouter.com", "api.trustedrouter.com", "api.trustedrouter.com"]
+            ["api.trustedrouter.com", "api.allyrouter.com", "api.uptimerouter.com"]
         )
     }
 
@@ -158,7 +161,7 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func testTransportErrorRetriesInferenceApexWhenRegionalFailoverEnabled() async throws {
+    func testTransportErrorMovesToAnAliasDomainWhenRegionalFailoverEnabled() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TransportSequenceProtocol.self]
         TransportSequenceProtocol.reset()
@@ -174,9 +177,12 @@ final class RetryAndClassificationTests: XCTestCase {
         ]
         let _: EmptyResponse = try await apexRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(TransportSequenceProtocol.served, 2)
+        // A connection failure is the case a dead domain actually produces, and
+        // it is the one where retrying the same name is guaranteed to fail
+        // again. This previously asserted exactly that as correct.
         XCTAssertEqual(
             TransportSequenceProtocol.requestedHosts,
-            ["api.trustedrouter.com", "api.trustedrouter.com"]
+            ["api.trustedrouter.com", "api.allyrouter.com"]
         )
     }
 
@@ -291,11 +297,17 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var inferenceHosts: [String] = []
     nonisolated(unsafe) static var idempotencyKeys: [String?] = []
     nonisolated(unsafe) static var firstInferenceStatus = 503
+    static let fastestHost = "api-us-east4.quillrouter.com"
     private static let lock = NSLock()
+    private static let inferenceSeen = NSCondition()
+    nonisolated(unsafe) private static var sawInference = false
     private let lifecycleLock = NSLock()
     private var stopped = false
 
     static func reset(firstInferenceStatus: Int = 503) {
+        inferenceSeen.lock()
+        sawInference = false
+        inferenceSeen.unlock()
         lock.lock()
         defer { lock.unlock() }
         healthCount = 0
@@ -304,6 +316,21 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         inferenceHosts = []
         idempotencyKeys = []
         self.firstInferenceStatus = firstInferenceStatus
+    }
+
+    /// Unblocks the slower health probes. See `startLoading`.
+    private static func signalFirstInference() {
+        inferenceSeen.lock()
+        sawInference = true
+        inferenceSeen.broadcast()
+        inferenceSeen.unlock()
+    }
+
+    private static func awaitFirstInference() {
+        inferenceSeen.lock()
+        let deadline = Date(timeIntervalSinceNow: 5)
+        while !sawInference && inferenceSeen.wait(until: deadline) {}
+        inferenceSeen.unlock()
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -315,8 +342,18 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
             Self.lock.lock()
             Self.healthCount += 1
             Self.lock.unlock()
-            let delay: TimeInterval = host == "api-us-east4.quillrouter.com" ? 0.005 : 0.04
-            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [self] in
+            if host == Self.fastestHost {
+                respondHealthIfActive(host: host)
+                return
+            }
+            // Every other region answers only after the winner has been picked
+            // and the first inference request has gone out, which cannot happen
+            // before the race resolves. Ordering the probes by wall-clock delay
+            // instead (5ms vs 40ms) made this a race the CI runner regularly
+            // lost: under load the 5ms host finishes last, and then "fastest"
+            // is whichever region the scheduler happened to favour.
+            DispatchQueue.global().async { [self] in
+                Self.awaitFirstInference()
                 respondHealthIfActive(host: host)
             }
             return
@@ -330,6 +367,7 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         Self.idempotencyKeys.append(request.value(forHTTPHeaderField: "idempotency-key"))
         let status = Self.inferenceHosts.count == 1 ? Self.firstInferenceStatus : 200
         Self.lock.unlock()
+        Self.signalFirstInference()
         respond(status: status, body: status == 200 ? "{}" : #"{"error":{"message":"draining"}}"#)
     }
 
