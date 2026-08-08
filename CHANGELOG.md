@@ -6,6 +6,14 @@ All notable changes to this SDK are documented here. Format roughly follows
 
 ## Unreleased
 
+## 0.6.1 — 2026-08-08
+
+### Fixed
+- Accept the published attestation rollout signing-key pins while preserving
+  verification of the prior production pins during rotation.
+
+## 0.6.0 — 2026-08-01
+
 ### Changed
 - Default inference base URL is now `https://api.trustedrouter.com/v1`.
 - Regional failover now re-requests the apex global load balancer; per-region
