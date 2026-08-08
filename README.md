@@ -9,7 +9,7 @@ This is a pure Swift, zero-dependency client SDK for the TrustedRouter gateway. 
 Add this to your `Package.swift` dependencies:
 
 ```swift
-.package(url: "https://github.com/Lore-Hex/trusted-router-swift.git", from: "0.6.0")
+.package(url: "https://github.com/Lore-Hex/trusted-router-swift.git", from: "0.6.1")
 ```
 
 Then add `"TrustedRouter"` to your target's dependencies.
