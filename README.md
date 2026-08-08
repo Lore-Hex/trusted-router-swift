@@ -104,6 +104,31 @@ and `subagentTool`.
 - **Pure Swift**: No 3rd party dependencies. Operates seamlessly on macOS, iOS, tvOS, watchOS, and Linux with `FoundationNetworking`.
 - **Retries**: Implements transparent exponential backoff on `429` responses and regional failover for `502`/`503`/`504` or transport errors.
 
+## Domain failover
+
+The regional gateways all live under one name on one DNS provider, and the
+domain sits above every cloud behind it. A zone that stops answering, a
+registrar lock, or a resolver handing out a stale record takes the API down no
+matter how many regions are healthy.
+
+`TrustedRouterConstants.aliasAPIBaseURLs` — `api.allyrouter.com` and
+`api.uptimerouter.com` — are exact aliases of the primary, on separate domains
+served by separate DNS providers, resolving to the same attested enclaves. They
+sit at the end of the candidate list, after the regional gateways, so a healthy
+deployment never touches them. They are deliberately left out of the health
+race: they resolve to the same enclaves, so racing them would move healthy
+traffic off the primary on a coin flip. Nothing to configure; it is on by
+default, including when you inject your own `URLSession`.
+
+Failover changes host only on connection failures and on `502`, `503`, or
+`504`. A `500` means a server received and processed the request, and inference
+is not idempotent, so re-sending it to another domain risks being billed twice;
+a 500 is retried on the same host.
+
+Aliases are used only for the default `baseUrl`. A custom one — a private
+deployment, a test server, a regional pin — is never rewritten. Pass
+`regionalFailover: false` to keep every attempt on a single host.
+
 ## Sign in with TrustedRouter
 
 Let users "bring their own TrustedRouter account" via the OAuth **PKCE** flow,
