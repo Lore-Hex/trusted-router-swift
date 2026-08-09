@@ -270,14 +270,57 @@ public final class TrustedRouter: Sendable {
         return "\(baseURLOverride ?? baseURL(for: plane))/\(relativePath)"
     }
 
+    private func header(_ response: HTTPURLResponse, _ name: String) -> String? {
+        for candidate in [name, name.lowercased(), name.capitalized] {
+            if let raw = response.allHeaderFields[candidate] as? String { return raw }
+        }
+        return nil
+    }
+
     private func parseRetryAfter(_ response: HTTPURLResponse) -> Double? {
-        if let raw = response.allHeaderFields["retry-after"] as? String ?? response.allHeaderFields["Retry-After"] as? String {
+        // retry-after-ms wins when both are present: it is the more precise of
+        // the two, and a server that sends it means the sub-second value.
+        if let rawMs = header(response, "retry-after-ms"),
+           let millis = Double(rawMs.trimmingCharacters(in: .whitespacesAndNewlines)),
+           millis >= 0 {
+            return millis / 1000.0
+        }
+        if let raw = header(response, "retry-after") {
             return Double(raw.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return nil
     }
 
-    private func isFailoverableStatus(_ statusCode: Int) -> Bool {
+    /// The gateway's explicit verdict, which overrides every heuristic below.
+    ///
+    /// A status code cannot say whether a provider already ran. A 502 from
+    /// "could not reach the provider" and a 502 from "the generation succeeded
+    /// and then settlement failed" are indistinguishable here, and only the
+    /// second is dangerous to re-send. Same header OpenAI's clients honour.
+    ///
+    /// `nil` means the server did not say, leaving behaviour unchanged for
+    /// older gateways and deliberately unlabelled paths.
+    private func shouldRetryVerdict(_ response: HTTPURLResponse) -> Bool? {
+        guard let raw = header(response, "x-should-retry") else { return nil }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true": return true
+        case "false": return false
+        default: return nil
+        }
+    }
+
+    /// Whether this response may move to a DIFFERENT domain. An explicit
+    /// `x-should-retry: false` forbids it outright.
+    ///
+    /// That check is UNREACHABLE today and has no test, deliberately: every
+    /// caller consults `shouldRetry` first, which already returns false for a
+    /// labelled response. It is kept so that widening the retry set later
+    /// cannot silently reintroduce domain movement on a spent response — the
+    /// failure this header exists to prevent. Mutation-testing it correctly
+    /// reports it as surviving. The Python SDK carries the same guard and the
+    /// same note.
+    private func isFailoverableStatus(_ statusCode: Int, _ response: HTTPURLResponse?) -> Bool {
+        if let response, shouldRetryVerdict(response) == false { return false }
         return statusCode == 502 || statusCode == 503 || statusCode == 504
     }
 
@@ -288,15 +331,26 @@ public final class TrustedRouter: Sendable {
         return URLComponents(string: path)?.scheme == nil
     }
 
-    private func shouldRetry(statusCode: Int, path: String, plane: TrustedRouterRequestPlane) -> Bool {
-        if statusCode == 429 {
-            return true
-        }
-        return regionalFailover && usesInferenceBase(path: path, plane: plane) && isFailoverableStatus(statusCode)
+    /// Whether we may send this again — independent of WHERE it goes.
+    ///
+    /// This used to require `regionalFailover` for 502/503/504, so pinning to
+    /// one host ALSO stopped retrying the gateway statuses entirely: one switch
+    /// answering two questions. The flag now governs only the destination.
+    private func shouldRetry(
+        statusCode: Int,
+        path: String,
+        plane: TrustedRouterRequestPlane,
+        response: HTTPURLResponse?
+    ) -> Bool {
+        if let response, let verdict = shouldRetryVerdict(response) { return verdict }
+        if statusCode == 429 { return true }
+        return usesInferenceBase(path: path, plane: plane) && isFailoverableStatus(statusCode, response)
     }
 
+    /// A transport failure means no server saw the request, so re-sending is
+    /// always safe; the flag only decides whether the retry may change host.
     private func shouldRetryTransportError(path: String, plane: TrustedRouterRequestPlane) -> Bool {
-        return regionalFailover && usesInferenceBase(path: path, plane: plane)
+        return usesInferenceBase(path: path, plane: plane)
     }
 
     private func retrySleepMs(attempt: Int, retryAfterSeconds: Double?) -> UInt64 {
@@ -456,9 +510,10 @@ public final class TrustedRouter: Sendable {
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw TrustedRouterError.internalError("Non-HTTP response")
                 }
-                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
+                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane, response: httpResponse) {
                     let retryAfter = parseRetryAfter(httpResponse)
-                    if isFailoverableStatus(httpResponse.statusCode), baseIndex < inferenceURLs.count - 1 {
+                    if regionalFailover, isFailoverableStatus(httpResponse.statusCode, httpResponse),
+                       baseIndex < inferenceURLs.count - 1 {
                         baseIndex += 1
                     }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
@@ -471,9 +526,10 @@ public final class TrustedRouter: Sendable {
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw TrustedRouterError.internalError("Non-HTTP response")
                 }
-                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane) {
+                if attempt < maxRetries && shouldRetry(statusCode: httpResponse.statusCode, path: path, plane: plane, response: httpResponse) {
                     let retryAfter = parseRetryAfter(httpResponse)
-                    if isFailoverableStatus(httpResponse.statusCode), baseIndex < inferenceURLs.count - 1 {
+                    if regionalFailover, isFailoverableStatus(httpResponse.statusCode, httpResponse),
+                       baseIndex < inferenceURLs.count - 1 {
                         baseIndex += 1
                     }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
@@ -488,7 +544,7 @@ public final class TrustedRouter: Sendable {
                 if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
-                if baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
+                if regionalFailover, baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
                 try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
                 attempt += 1
             }
@@ -569,16 +625,17 @@ public final class TrustedRouter: Sendable {
                 if attempt >= maxRetries || !shouldRetryTransportError(path: path, plane: plane) {
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
-                if baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
+                if regionalFailover, baseIndex < inferenceURLs.count - 1 { baseIndex += 1 }
                 try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: nil))
                 attempt += 1
                 continue
             }
 
             if response.statusCode >= 400 {
-                if attempt < maxRetries && shouldRetry(statusCode: response.statusCode, path: path, plane: plane) {
+                if attempt < maxRetries && shouldRetry(statusCode: response.statusCode, path: path, plane: plane, response: response) {
                     let retryAfter = parseRetryAfter(response)
-                    if isFailoverableStatus(response.statusCode), baseIndex < inferenceURLs.count - 1 {
+                    if regionalFailover, isFailoverableStatus(response.statusCode, response),
+                       baseIndex < inferenceURLs.count - 1 {
                         baseIndex += 1
                     }
                     try await Task.sleep(nanoseconds: retrySleepMs(attempt: attempt, retryAfterSeconds: retryAfter))
