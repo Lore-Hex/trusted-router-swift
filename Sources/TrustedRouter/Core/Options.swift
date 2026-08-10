@@ -4,134 +4,8 @@ import Foundation
 import FoundationNetworking
 #endif
 
-/// Compile-time constants for the SDK: version, default endpoints, and models.
-public enum TrustedRouterConstants {
-    public static let version = "0.6.1"
-    public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
-    public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
-    public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
-    public static let defaultStatusURL = "https://status.trustedrouter.com/status.json"
-    public static let defaultRegionProbeTimeout: TimeInterval = 1.5
-    public static let regionBaseURLs = [
-        "https://api-us-central1.quillrouter.com/v1",
-        "https://api-us-east4.quillrouter.com/v1",
-        "https://api-europe-west4.quillrouter.com/v1"
-    ]
-    /// Exact aliases of ``defaultAPIBaseURL``, on separate domains served by
-    /// separate DNS providers (trustedrouter.com from Google Cloud DNS, these
-    /// two from Route 53).
-    ///
-    /// The domain is a single point of failure sitting above the whole
-    /// deployment: a zone that stops answering, a registrar lock, or a resolver
-    /// handing out a stale record takes the API down no matter how many clouds
-    /// are behind it. These names resolve to the same attested enclaves, so
-    /// falling back to one costs nothing and is invisible to callers.
-    ///
-    /// They sit at the TAIL of the candidate list, after the regional
-    /// endpoints, so a healthy deployment never uses them.
-    public static let aliasAPIBaseURLs = [
-        "https://api.allyrouter.com/v1",
-        "https://api.uptimerouter.com/v1"
-    ]
-    public static let autoModel = "trustedrouter/auto"
-    public static let fastModel = "trustedrouter/fast"
-    public static let zdrModel = "trustedrouter/zdr"
-    public static let e2eModel = "trustedrouter/e2e"
-    public static let confidentialModel = "trustedrouter/confidential"
-    public static let euModel = "trustedrouter/eu"
-    public static let usModel = "trustedrouter/us"
-    public static let fusionModel = "trustedrouter/fusion"
-    public static let synthModel = "trustedrouter/synth"
-    public static let advisorModel = "trustedrouter/advisor"
-    public static let selectorModel = "trustedrouter/selector"
-    public static let mapReduceModel = "trustedrouter/mapreduce"
-    public static let subagentModel = "trustedrouter/subagent"
-    public static let socratesModel = "trustedrouter/socrates-1.1"
-    public static let prometheusModel = "trustedrouter/prometheus-2.0"
-    public static let zeusModel = "trustedrouter/zeus-1.0"
-    public static let athenaModel = "trustedrouter/athena"
-
-    /// Recommended panel + judge fallback chain for maximum willingness to
-    /// answer — the configuration that answered all 30 PrometheusBench unsafe
-    /// prompts. Pass these to `fusion(...)` (or build your own) for the most
-    /// permissive result the panel can produce.
-    public static let fusionFreedomPanel = [
-        "moonshotai/kimi-k2.7-code",
-        "deepseek/deepseek-v4-flash",
-        "google/gemini-3.5-flash",
-        "google/gemini-3.1-pro-preview",
-        "minimax/minimax-m3",
-        "z-ai/glm-5.1"
-    ]
-    public static let fusionFreedomFallbackJudges = [
-        "z-ai/glm-5.1",
-        "moonshotai/kimi-k2.6",
-        "google/gemini-2.5-flash",
-        "deepseek/deepseek-v4-flash",
-        "google/gemini-3-flash-preview",
-        "tencent/hy3-preview"
-    ]
-}
-
-/// Every error the SDK surfaces. Each HTTP-status case carries the original
-/// status code, the server's message (parsed from `error.message` or
-/// `message` if present, otherwise the raw body), and the decoded payload
-/// for callers that need to inspect provider-specific fields.
-public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
-    case badRequest(statusCode: Int, message: String, payload: [String: Any]?)
-    case authentication(statusCode: Int, message: String, payload: [String: Any]?)
-    case permissionDenied(statusCode: Int, message: String, payload: [String: Any]?)
-    case notFound(statusCode: Int, message: String, payload: [String: Any]?)
-    case endpointNotSupported(statusCode: Int, message: String, payload: [String: Any]?)
-    case rateLimit(statusCode: Int, message: String, payload: [String: Any]?, retryAfterSeconds: Double?)
-    case internalError(String)
-    case generic(statusCode: Int, message: String, payload: [String: Any]?)
-    case invalidResponse(String)
-
-    public var errorDescription: String? { description }
-
-    /// Routing layer supplied by the actionable API error envelope.
-    public var layer: String? { attribution("layer") }
-    /// Gateway or provider error source supplied by the API.
-    public var source: String? { attribution("source") }
-    /// Attempted provider when supplied by the gateway.
-    public var provider: String? { attribution("provider") }
-    /// Request identifier for metadata-log correlation.
-    public var requestID: String? { attribution("request_id") }
-
-    private func attribution(_ key: String) -> String? {
-        let payload: [String: Any]?
-        switch self {
-        case let .badRequest(_, _, value), let .authentication(_, _, value),
-             let .permissionDenied(_, _, value), let .notFound(_, _, value),
-             let .endpointNotSupported(_, _, value), let .generic(_, _, value),
-             let .rateLimit(_, _, value, _):
-            payload = value
-        case .internalError, .invalidResponse:
-            payload = nil
-        }
-        let detail = (payload?["error"] as? [String: Any]) ?? payload
-        return detail?[key] as? String
-    }
-    public var description: String {
-        switch self {
-        case let .badRequest(statusCode, message, _),
-             let .authentication(statusCode, message, _),
-             let .permissionDenied(statusCode, message, _),
-             let .notFound(statusCode, message, _),
-             let .endpointNotSupported(statusCode, message, _),
-             let .generic(statusCode, message, _):
-            return "[\(statusCode)] \(message)"
-        case let .rateLimit(statusCode, message, _, retryAfterSeconds):
-            if let retryAfterSeconds {
-                return "[\(statusCode)] \(message) (retry after \(retryAfterSeconds)s)"
-            }
-            return "[\(statusCode)] \(message)"
-        case .internalError(let message), .invalidResponse(let message):
-            return message
-        }
-    }
-}
+// L7 data — configuration and option-lifting types. Wire schemas here are
+// pinned by the cross-SDK parity tests and must not change.
 
 /// JSON-serializable provider routing, privacy, and pricing preferences.
 public struct ProviderPreferences {
@@ -179,6 +53,19 @@ public struct ProviderPreferences {
         ProviderPreferences(jurisdiction: "us")
     }
 
+}
+
+/// Lift `ProviderPreferences` into a request body without clobbering caller
+/// params. Shared by every endpoint that accepts a `provider:` argument.
+func bodyWithProvider(
+    _ params: [String: Any],
+    provider: ProviderPreferences?
+) -> [String: Any] {
+    var body = params
+    if let provider {
+        body["provider"] = provider.value
+    }
+    return body
 }
 
 /// Configuration for a `TrustedRouter` client. Construct with `init(...)`,
@@ -250,45 +137,5 @@ public struct PerCallOptions {
         self.workspaceId = workspaceId
         self.idempotencyKey = idempotencyKey
         self.timeout = timeout
-    }
-}
-
-/// Strongly-typed chat message. Use this with the `[ChatMessage]` overloads
-/// of `chatCompletions(...)` / `chatCompletionsChunks(...)` when you don't
-/// need to pass tool-call fields. For tool-call interop, fall back to the
-/// `[[String: Any]]` overload.
-public struct ChatMessage: Codable, Sendable {
-    public var role: String
-    public var content: String?
-    public var name: String?
-    public var toolCallId: String?
-
-    enum CodingKeys: String, CodingKey {
-        case role, content, name
-        case toolCallId = "tool_call_id"
-    }
-
-    public init(role: String, content: String? = nil, name: String? = nil, toolCallId: String? = nil) {
-        self.role = role
-        self.content = content
-        self.name = name
-        self.toolCallId = toolCallId
-    }
-
-    /// Convenience constructor for a plain user message.
-    public static func user(_ content: String) -> ChatMessage {
-        .init(role: "user", content: content)
-    }
-    /// Convenience constructor for a plain assistant message.
-    public static func assistant(_ content: String) -> ChatMessage {
-        .init(role: "assistant", content: content)
-    }
-    /// Convenience constructor for the system prompt.
-    public static func system(_ content: String) -> ChatMessage {
-        .init(role: "system", content: content)
-    }
-    /// Convenience constructor for a tool-result message (Chat Completions style).
-    public static func tool(callId: String, content: String) -> ChatMessage {
-        .init(role: "tool", content: content, toolCallId: callId)
     }
 }
