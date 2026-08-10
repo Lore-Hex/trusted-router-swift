@@ -81,6 +81,29 @@ final class ShouldRetryHeaderTests: XCTestCase {
                        "but must not move host")
     }
 
+    /// Added with the transport-engine extraction: pins the count-1 bound on
+    /// THE single candidate-advance site. With the bound removed, exhausting
+    /// the candidate list would index past its end instead of staying pinned
+    /// to the last alias domain.
+    func testExhaustedCandidatesStayPinnedToTheLastAliasDomain() async throws {
+        ShouldRetryProtocol.reset()
+        ShouldRetryProtocol.scripted = [(502, #"{"error":{"message":"unavailable"}}"#, [:])]
+        let client = try router(3)
+
+        do {
+            let _: EmptyResponse = try await client.request(method: "GET", path: "/x")
+            XCTFail("expected the exhausted 502 to surface")
+        } catch { /* expected */ }
+
+        XCTAssertEqual(ShouldRetryProtocol.served, 4, "maxRetries=3 means four attempts")
+        XCTAssertEqual(
+            ShouldRetryProtocol.requestedHosts,
+            ["api.trustedrouter.com", "api.allyrouter.com", "api.uptimerouter.com",
+             "api.uptimerouter.com"],
+            "after the list is exhausted, further retries stay on the last alias"
+        )
+    }
+
     func testRetryAfterMsIsHonoredAndBeatsRetryAfter() async throws {
         // 30s would blow the test timeout and 10ms cannot; the gap is the assertion.
         ShouldRetryProtocol.reset()
