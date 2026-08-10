@@ -136,7 +136,11 @@ final class RetryAndClassificationTests: XCTestCase {
         } catch { XCTFail("wrong error: \(error)") }
     }
 
-    func testFailoverableStatusDoesNotRetryWhenRegionalFailoverDisabled() async throws {
+    func testFailoverableStatusRetriesInPlaceWhenRegionalFailoverDisabled() async throws {
+        // This asserted that disabling regionalFailover ALSO stopped retrying
+        // 502/503/504 — one switch answering two questions, which is why
+        // `served == 1` looked correct. The flag now governs only WHERE a
+        // retry goes: a pinned client still retries, on the host it was given.
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SequenceProtocol.self]
         SequenceProtocol.reset()
@@ -151,14 +155,13 @@ final class RetryAndClassificationTests: XCTestCase {
             (502, #"{"error":{"message":"bad gateway"}}"#, nil),
             (200, #"{}"#, nil),
         ]
-        do {
-            let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
-            XCTFail("expected generic error")
-        } catch TrustedRouterError.generic(let code, let msg, _) {
-            XCTAssertEqual(code, 502)
-            XCTAssertEqual(msg, "bad gateway")
-            XCTAssertEqual(SequenceProtocol.served, 1)
-        } catch { XCTFail("wrong error: \(error)") }
+        let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
+        XCTAssertEqual(SequenceProtocol.served, 2, "a pinned client should still retry a 502")
+        XCTAssertEqual(
+            Set(SequenceProtocol.requestedHosts),
+            ["api.trustedrouter.com"],
+            "but it must not move host"
+        )
     }
 
     func testTransportErrorMovesToAnAliasDomainWhenRegionalFailoverEnabled() async throws {
@@ -186,7 +189,10 @@ final class RetryAndClassificationTests: XCTestCase {
         )
     }
 
-    func testTransportErrorDoesNotRetryWhenRegionalFailoverDisabled() async throws {
+    func testTransportErrorRetriesInPlaceWhenRegionalFailoverDisabled() async throws {
+        // Same correction as above, and a starker one: a dial failure means no
+        // server saw the request, so refusing to retry it at all was the least
+        // defensible reading of "don't move me to another region".
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TransportSequenceProtocol.self]
         TransportSequenceProtocol.reset()
@@ -201,12 +207,13 @@ final class RetryAndClassificationTests: XCTestCase {
             .failure(URLError(.cannotConnectToHost)),
             .response(200, #"{}"#),
         ]
-        do {
-            let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
-            XCTFail("expected transport failure")
-        } catch TrustedRouterError.internalError {
-            XCTAssertEqual(TransportSequenceProtocol.served, 1)
-        } catch { XCTFail("wrong error: \(error)") }
+        let _: EmptyResponse = try await noFailoverRouter.request(method: "GET", path: "/x")
+        XCTAssertEqual(TransportSequenceProtocol.served, 2, "should retry the dial failure")
+        XCTAssertEqual(
+            Set(TransportSequenceProtocol.requestedHosts),
+            ["api.trustedrouter.com"],
+            "but it must not move host"
+        )
     }
 
     func test4xxOutsideKnownCodesDoesNotRetry() async {
