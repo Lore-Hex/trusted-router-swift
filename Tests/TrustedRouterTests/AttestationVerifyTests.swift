@@ -20,7 +20,7 @@ final class AttestationVerifyTests: XCTestCase {
         let jwt = try kit.makeJWT()
         let result = try await verifyGatewayAttestation(
             document: Data(jwt.utf8),
-            policy: AttestationPolicy(audience: "quill-cloud"),
+            policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
             jwks: kit.jwks
         )
         XCTAssertEqual(result.audience, "quill-cloud")
@@ -46,7 +46,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(tampered.utf8),
-                policy: AttestationPolicy(audience: "quill-cloud"),
+                policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
                 jwks: kit.jwks
             )
             XCTFail("expected verification to fail on tampered signature")
@@ -87,7 +87,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(),
+                policy: AttestationPolicy(imageDigest: "sha256:abc"),
                 jwks: kit.jwks
             )
             XCTFail("expected debug workload rejection")
@@ -96,7 +96,7 @@ final class AttestationVerifyTests: XCTestCase {
         }
         _ = try await verifyGatewayAttestation(
             document: Data(jwt.utf8),
-            policy: AttestationPolicy(allowDebug: true),
+            policy: AttestationPolicy(imageDigest: "sha256:abc", allowDebug: true),
             jwks: kit.jwks
         )
         #else
@@ -134,7 +134,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(),
+                policy: AttestationPolicy(imageDigest: "sha256:abc"),
                 jwks: kit.jwks
             )
             XCTFail("expected expiration rejection")
@@ -157,7 +157,7 @@ final class AttestationVerifyTests: XCTestCase {
 
         let result = try await verifyGatewayAttestation(
             document: Data(jwt.utf8),
-            policy: AttestationPolicy(audience: "quill-cloud"),
+            policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
             nonceHex: freshNonce,
             tlsExporter: exporter,
             jwks: kit.jwks
@@ -181,7 +181,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(audience: "quill-cloud"),
+                policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
                 nonceHex: freshNonce,
                 tlsExporter: exporter,
                 jwks: kit.jwks
@@ -207,7 +207,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(audience: "quill-cloud"),
+                policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
                 tlsExporter: exporter,
                 jwks: kit.jwks
             )
@@ -231,7 +231,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(audience: "quill-cloud"),
+                policy: AttestationPolicy(audience: "quill-cloud", imageDigest: "sha256:abc"),
                 nonceHex: exporter.hexString,
                 tlsExporter: exporter,
                 jwks: kit.jwks
@@ -252,7 +252,7 @@ final class AttestationVerifyTests: XCTestCase {
         #if canImport(Network)
         let session = try await verifyGatewaySession(
             baseURL: TrustedRouterConstants.defaultAPIBaseURL,
-            policy: AttestationPolicy()
+            policy: AttestationPolicy(imageDigest: "sha256:abc")
         )
         print("G6 verified cert=\(session.attestation.certSha256) exporter=\(session.exporter.hexString.prefix(16))...")
         let followUp = try await fetchAttestationAgain(session)
