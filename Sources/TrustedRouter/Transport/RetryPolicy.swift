@@ -65,16 +65,47 @@ enum RetryPolicy {
         return nil
     }
 
+    /// Ceiling on a server-supplied Retry-After floor, in seconds.
+    ///
+    /// Retry-After arrives from whatever answered the socket — the gateway, a
+    /// proxy in front of it, an alias domain — so it is untrusted input, and it
+    /// was applied as an *uncapped* floor on the backoff sleep. Swift's
+    /// `Double.init?(String)` is far more permissive than the RFC 7231 grammar:
+    /// "inf", "Inf", "infinity", "Infinity" and "+inf" all parse to
+    /// `.infinity`, and "1e400" silently overflows to it. The old
+    /// `millis >= 0` test passes for `.infinity`.
+    ///
+    /// That mattered more here than in any other SDK, because `UInt64(Double)`
+    /// **traps** on an infinite or out-of-range value — a Swift runtime fatal
+    /// error, not a catchable Swift error. Measured on Swift 6.0.3: a single
+    /// `Retry-After: inf` response terminated the process with SIGTRAP. On iOS
+    /// that is an app crash driven by a response header.
+    ///
+    /// 60s matches MAX_RETRY_AFTER_SECONDS in the Python and JS SDKs,
+    /// MaxRetryAfterSeconds in Go, and MAX_RETRY_AFTER in Rust, so every SDK
+    /// accepts the same header language.
+    static let maxRetryAfterSeconds: Double = 60
+
+    /// Clamps a parsed hint into `0...maxRetryAfterSeconds`, or rejects it.
+    ///
+    /// Returns nil for anything that is not a usable delay — NaN, ±infinity,
+    /// negatives — so the caller falls through to plain jittered backoff.
+    static func boundedRetryAfter(_ seconds: Double) -> Double? {
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        return min(seconds, maxRetryAfterSeconds)
+    }
+
     static func parseRetryAfter(_ response: HTTPURLResponse) -> Double? {
         // retry-after-ms wins when both are present: it is the more precise of
         // the two, and a server that sends it means the sub-second value.
         if let rawMs = header(response, "retry-after-ms"),
            let millis = Double(rawMs.trimmingCharacters(in: .whitespacesAndNewlines)),
-           millis >= 0 {
-            return millis / 1000.0
+           let bounded = boundedRetryAfter(millis / 1000.0) {
+            return bounded
         }
-        if let raw = header(response, "retry-after") {
-            return Double(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let raw = header(response, "retry-after"),
+           let seconds = Double(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            return boundedRetryAfter(seconds)
         }
         return nil
     }
@@ -138,9 +169,16 @@ enum RetryPolicy {
     /// server-supplied retry-after. Pure: the transport engine is the only
     /// place that actually sleeps on this value.
     static func retrySleepMs(attempt: Int, retryAfterSeconds: Double?) -> UInt64 {
-        let baseMs = min(30_000, 500 * pow(2.0, Double(attempt)))
+        // pow(2.0, Double(attempt)) is +infinity for a large attempt, so clamp
+        // the exponent too: this path can overflow with no header involved.
+        let baseMs = min(30_000, 500 * pow(2.0, Double(min(max(attempt, 0), 16))))
         let jittered = Double.random(in: 0...baseMs)
-        let floor = (retryAfterSeconds ?? 0) * 1000.0
-        return UInt64(max(jittered, floor) * 1_000_000)
+        // Re-clamp rather than trusting the caller: retrySleepMs is reachable
+        // independently of parseRetryAfter, and UInt64(Double) TRAPS on an
+        // infinite or out-of-range value rather than erroring, so an unbounded
+        // hint terminates the process instead of producing a bad delay.
+        let floor = (boundedRetryAfter(retryAfterSeconds ?? 0) ?? 0) * 1000.0
+        let clamped = min(max(jittered, floor), maxRetryAfterSeconds * 1000.0)
+        return UInt64(clamped * 1_000_000)
     }
 }
