@@ -87,7 +87,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(),
+                policy: AttestationPolicy(imageDigest: "sha256:abc"),
                 jwks: kit.jwks
             )
             XCTFail("expected debug workload rejection")
@@ -134,7 +134,7 @@ final class AttestationVerifyTests: XCTestCase {
         do {
             _ = try await verifyGatewayAttestation(
                 document: Data(jwt.utf8),
-                policy: AttestationPolicy(),
+                policy: AttestationPolicy(imageDigest: "sha256:abc"),
                 jwks: kit.jwks
             )
             XCTFail("expected expiration rejection")
@@ -252,7 +252,7 @@ final class AttestationVerifyTests: XCTestCase {
         #if canImport(Network)
         let session = try await verifyGatewaySession(
             baseURL: TrustedRouterConstants.defaultAPIBaseURL,
-            policy: AttestationPolicy()
+            policy: AttestationPolicy(imageDigest: "sha256:abc")
         )
         print("G6 verified cert=\(session.attestation.certSha256) exporter=\(session.exporter.hexString.prefix(16))...")
         let followUp = try await fetchAttestationAgain(session)
