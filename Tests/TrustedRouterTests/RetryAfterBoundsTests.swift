@@ -1,6 +1,10 @@
 import XCTest
 @testable import TrustedRouter
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 /// Property tests for the Retry-After bound.
 ///
 /// Retry-After arrives from whatever answered the socket — the gateway, a
