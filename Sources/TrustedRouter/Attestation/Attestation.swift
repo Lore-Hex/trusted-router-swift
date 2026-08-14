@@ -87,6 +87,21 @@ public struct AttestationPolicy: Sendable {
         self.imageReferences = imageReferences
         self.allowDebug = allowDebug
     }
+
+    /// Whether this policy constrains *which* workload image is acceptable.
+    ///
+    /// Both image checks in `verifyGatewayAttestation` are guarded on a
+    /// non-empty accepted list, so a policy pinning neither a digest nor a
+    /// reference accepts any genuinely-attested Confidential Space workload —
+    /// it proves "some CSP VM" rather than "the gateway build we published".
+    /// Policy construction and verification both refuse that state rather than
+    /// silently downgrading the guarantee.
+    public var pinsImageIdentity: Bool {
+        !imageDigests.isEmpty
+            || !(imageDigest ?? "").isEmpty
+            || !imageReferences.isEmpty
+            || !(imageReference ?? "").isEmpty
+    }
 }
 
 public struct AttestationVerificationError: Error, LocalizedError, CustomStringConvertible {
@@ -182,7 +197,7 @@ public func policyFromTrustRelease(
     let imageReference = rel["image_reference"] as? String
     let publishedReferences = (rel["accepted_image_references"] as? [String])?
         .filter { !$0.isEmpty } ?? []
-    return AttestationPolicy(
+    let policy = AttestationPolicy(
         audience: audience,
         certSha256: certSha256,
         imageDigest: imageDigest,
@@ -190,6 +205,18 @@ public func policyFromTrustRelease(
         imageReference: imageReference,
         imageReferences: publishedReferences.isEmpty ? imageReference.map { [$0] } ?? [] : publishedReferences
     )
+    guard policy.pinsImageIdentity else {
+        // A truncated body, an error page that happens to parse as JSON, or a
+        // schema change all land here. Returning the policy anyway would leave
+        // the caller believing it verified a specific build while both image
+        // checks silently no-op, so refuse where the degraded input is visible.
+        throw AttestationVerificationError(
+            "trust release pins no image identity (none of image_digest, "
+            + "accepted_image_digests, image_reference, accepted_image_references); "
+            + "refusing to build a policy that would accept any Confidential Space workload"
+        )
+    }
+    return policy
 }
 
 func b64urlDecode(_ base64URLEncoded: String) -> Data? {
@@ -347,6 +374,15 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
         imageReference = container["image_reference"] as? String ?? ""
     }
     
+    guard policy.pinsImageIdentity else {
+        // Defence in depth for hand-built policies: both image checks below are
+        // guarded on a non-empty accepted list, so reaching them with nothing
+        // pinned would accept any attested workload.
+        throw AttestationVerificationError(
+            "attestation policy pins no image identity; refusing to verify against a "
+            + "policy that cannot distinguish the gateway from any other workload"
+        )
+    }
     let acceptedImageDigests = policy.imageDigests.isEmpty
         ? policy.imageDigest.map { [$0] } ?? []
         : policy.imageDigests
