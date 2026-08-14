@@ -96,7 +96,7 @@ final class AttestationVerifyTests: XCTestCase {
         }
         _ = try await verifyGatewayAttestation(
             document: Data(jwt.utf8),
-            policy: AttestationPolicy(allowDebug: true),
+            policy: AttestationPolicy(imageDigest: "sha256:abc", allowDebug: true),
             jwks: kit.jwks
         )
         #else
