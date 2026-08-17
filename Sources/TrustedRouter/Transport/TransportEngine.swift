@@ -69,6 +69,7 @@ extension TrustedRouter {
         headers: [String: String]?,
         body: Data?,
         options: PerCallOptions,
+        streaming: Bool = false,
         sendAttempt: (URLRequest) async throws -> (Payload, HTTPURLResponse)
     ) async throws -> (Payload, HTTPURLResponse) {
         // (Invariant 5) The idempotency key is minted ONCE, before the loop,
@@ -89,6 +90,15 @@ extension TrustedRouter {
         // control plane and absolute fetches get an empty list, which makes
         // the advance below structurally unreachable for them.
         let candidates = inference ? await inferenceBaseURLs() : []
+        // Client telemetry (contract v1, header channel): THE single emit
+        // point (§6.1 — do not add a second). A recorder exists only for
+        // enabled clients on inference-plane relative paths, so control-plane
+        // calls and absolute fetches produce no header and no recorder
+        // activity; `rawRequest` never rides this loop and stays untouched
+        // as the reserved beacon attach point.
+        let recorder: RequestRecorder? = (telemetryEnabled && inference)
+            ? RequestRecorder(streaming: streaming)
+            : nil
 
         while true {
             let selectedBaseURL = candidates.isEmpty ? nil : candidates[candidateIndex]
@@ -100,18 +110,21 @@ extension TrustedRouter {
             guard let url = URL(string: urlString) else {
                 throw TrustedRouterError.internalError("Invalid URL: \(urlString)")
             }
+            recorder?.beginAttempt(baseURL: selectedBaseURL ?? baseUrl)
             let request = buildURLRequest(
                 method: method,
                 url: url,
                 headers: headers,
                 options: effectiveOptions,
-                body: body
+                body: body,
+                telemetryHeaderValue: recorder?.headerValue()
             )
 
             let retryAfterSeconds: Double?
             let mayMoveHost: Bool
             do {
                 let (payload, http) = try await sendAttempt(request)
+                recorder?.onResponse(statusCode: http.statusCode)
                 guard attempt < maxRetries,
                       RetryPolicy.shouldRetry(
                           statusCode: http.statusCode,
@@ -134,6 +147,11 @@ extension TrustedRouter {
                 // never retried.
                 throw err
             } catch {
+                // Telemetry captures the error CLASS here, at the bare catch
+                // — the flatten to `.internalError(localizedDescription)`
+                // below keeps only a message string, after which dns vs tls
+                // vs connect-refused is unrecoverable (§6.1).
+                recorder?.onTransportError(error)
                 guard attempt < maxRetries,
                       RetryPolicy.shouldRetryTransportError(path: path, plane: plane)
                 else {
@@ -149,6 +167,7 @@ extension TrustedRouter {
             // THE single advance site (invariant 7: the flag gates WHERE only).
             if regionalFailover, mayMoveHost, candidateIndex < candidates.count - 1 {
                 candidateIndex += 1
+                recorder?.onMoved()
             }
             // The single sleep site.
             try await Task.sleep(nanoseconds: RetryPolicy.retrySleepMs(
@@ -167,7 +186,8 @@ extension TrustedRouter {
         url: URL,
         headers: [String: String]?,
         options: PerCallOptions,
-        body: Data?
+        body: Data?,
+        telemetryHeaderValue: String? = nil
     ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -185,7 +205,8 @@ extension TrustedRouter {
             idempotencyKey: options.idempotencyKey,
             apiKey: options.apiKey,
             workspaceId: options.workspaceId,
-            includeCredentials: credentialHostAllowlist.allowsCredentials(for: url)
+            includeCredentials: credentialHostAllowlist.allowsCredentials(for: url),
+            telemetryHeaderValue: telemetryHeaderValue
         )
         for (name, value) in requestHeaders {
             request.setValue(value, forHTTPHeaderField: name)

@@ -159,6 +159,9 @@ extension TrustedRouter {
 }
 
 public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultTrustReleaseURL, urlSession: URLSession = .shared) async throws -> [String: Any] {
+    if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(urlSession) {
+        throw reservedTelemetrySessionDefaultError(reservedName, entryPoint: "fetchTrustRelease")
+    }
     guard let url = URL(string: trustUrl) else {
         throw TrustedRouterError.internalError("Invalid trust release URL")
     }
@@ -189,6 +192,11 @@ public func policyFromTrustRelease(
     if let release = release {
         rel = release
     } else {
+        if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(urlSession) {
+            throw reservedTelemetrySessionDefaultError(
+                reservedName, entryPoint: "policyFromTrustRelease"
+            )
+        }
         rel = try await fetchTrustRelease(trustUrl: trustReleaseUrl, urlSession: urlSession)
     }
     let imageDigest = rel["image_digest"] as? String
@@ -268,6 +276,11 @@ public func verifyGatewayAttestation(
     if let jwks = jwks {
         activeJwks = jwks
     } else {
+        if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(urlSession) {
+            throw reservedTelemetrySessionDefaultError(
+                reservedName, entryPoint: "verifyGatewayAttestation"
+            )
+        }
         guard let url = URL(string: jwksUrl) else {
             throw AttestationVerificationError("Invalid JWKS URL")
         }
@@ -329,6 +342,22 @@ public func verifyGatewayAttestation(
     
     // Check claims
     return try checkClaims(claims: payload, policy: policy, nonceHex: nonceHex, tlsCertDer: tlsCertDer, tlsExporter: tlsExporter)
+}
+
+/// A caller-provided session cannot be allowed to default the SDK-reserved
+/// telemetry field: URLSession merges these defaults after request assembly,
+/// beyond the point where the SDK can strip them. Keep the refusal diagnostic
+/// shared across the standalone trust/attestation entry points.
+private func reservedTelemetrySessionDefaultError(
+    _ reservedName: String,
+    entryPoint: String
+) -> TrustedRouterError {
+    .internalError(
+        "The URLSession passed to \(entryPoint) sets the SDK-reserved header "
+        + "'\(reservedName)' in URLSessionConfiguration.httpAdditionalHeaders. "
+        + "Remove it from httpAdditionalHeaders; x-tr-client may only be set "
+        + "by the SDK's telemetry recorder."
+    )
 }
 
 private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonceHex: String?, tlsCertDer: Data?, tlsExporter: Data?) throws -> GatewayAttestation {

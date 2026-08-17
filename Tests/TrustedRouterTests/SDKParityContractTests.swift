@@ -109,6 +109,38 @@ final class SDKParityContractTests: XCTestCase {
         )
     }
 
+    /// Client-telemetry contract v1 §6.4: the beacon path, schema version,
+    /// and closed enum vocabularies are pinned raw so the later beacon PR
+    /// (and every other SDK) speaks exactly this wire language. Do not edit
+    /// without a coordinated cross-SDK release.
+    func testClientTelemetryVocabularyIsPinned() {
+        XCTAssertEqual(ClientTelemetry.schemaVersion, 1)
+        XCTAssertEqual(ClientTelemetry.beaconPath, "/client-events")
+        XCTAssertEqual(ClientTelemetry.hosts, [
+            "apex", "ally", "uptime", "us_central1", "us_east4",
+            "europe_west4", "control", "custom",
+        ])
+        XCTAssertEqual(ClientTelemetry.endpoints, [
+            "chat_completions", "messages", "responses", "embeddings",
+            "images", "videos", "models", "fusion", "control_other",
+            "inference_other",
+        ])
+        XCTAssertEqual(ClientTelemetry.outcomes, [
+            "ok", "http_error", "transport_error", "timeout",
+            "stream_broken", "aborted",
+        ])
+        XCTAssertEqual(ClientTelemetry.finalOutcomes, [
+            "ok", "http_error", "transport_error", "timeout",
+            "stream_broken", "aborted", "exhausted",
+        ])
+        XCTAssertEqual(ClientTelemetry.errorClasses, [
+            "dns", "tls", "connect_refused", "connect_timeout",
+            "connect_error", "read_timeout", "write_timeout", "pool_timeout",
+            "protocol_error", "reset", "io_error", "proxy_error",
+            "stream_stalled", "unknown",
+        ])
+    }
+
     func testErrorAttributionRetainsPayload() {
         let payload: [String: Any] = ["error": [
             "message": "upstream unavailable",

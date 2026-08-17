@@ -6,7 +6,31 @@ All notable changes to this SDK are documented here. Format roughly follows
 
 ## Unreleased
 
+### Added
+- Content-free client reliability telemetry, header channel only
+  (client-telemetry contract v1): every inference-plane attempt carries an
+  `x-tr-client` header describing the attempt index, the previous attempt's
+  outcome/class/host/timing, streaming, and failover use. Configured with the
+  new `TrustedRouterOptions.telemetry` option, honouring the documented
+  `TRUSTEDROUTER_TELEMETRY` > `DO_NOT_TRACK` precedence, defaulting on only
+  for known TrustedRouter hosts. Custom base URLs and control-plane calls
+  never send it; the beacon channel is deliberately deferred per the
+  contract's rollout order.
+- `x-tr-client` is SDK-reserved: a caller-supplied value is stripped from
+  every header layer the SDK merges, and because a header set in an injected
+  session's `URLSessionConfiguration.httpAdditionalHeaders` is merged by the
+  URL loading system after the request leaves the SDK — where it cannot be
+  stripped — constructing a `TrustedRouter` with such a session now throws
+  rather than letting the value ride requests the SDK did not describe. Only
+  this one field name is rejected; any other session default header is
+  untouched. To turn telemetry off use `TrustedRouterOptions.telemetry`,
+  `TRUSTEDROUTER_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
+
 ### Fixed
+- The User-Agent now matches the contract §3.1 grammar
+  (`trusted-router-swift/SEMVER runtime/ver`): the old parenthesised
+  `(macOS 14.6)` suffix fell outside the grammar the enclave parses, so the
+  runtime information was silently dropped server-side.
 - Header layers now merge case-insensitively, so an override like
   `User-Agent` or `Authorization` supplied in a different casing than the
   SDK's lowercase keys deterministically wins by layer precedence
