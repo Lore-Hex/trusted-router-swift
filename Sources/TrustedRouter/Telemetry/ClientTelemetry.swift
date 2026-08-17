@@ -257,16 +257,25 @@ enum ClientTelemetry {
         ]) {
             return "dns"
         }
-        if inChain(urlCodes: [URLError.cannotConnectToHost.rawValue])
-            || inChain(posixCodes: [Int(ECONNREFUSED)]) {
+        // POSIX detail outranks the coarse URLError bucket:
+        // `.cannotConnectToHost` covers refused, unreachable, and more, but
+        // when the underlying errno survives in the chain it says WHICH —
+        // ECONNREFUSED is a live host refusing (connect_refused), while an
+        // unreachable host or network is connect_error. Bare
+        // `.cannotConnectToHost` with no errno falls back to
+        // connect_refused, its overwhelmingly common cause.
+        if inChain(posixCodes: [Int(ECONNREFUSED)]) {
+            return "connect_refused"
+        }
+        if inChain(posixCodes: [Int(EHOSTUNREACH), Int(ENETUNREACH)]) {
+            return "connect_error"
+        }
+        if inChain(urlCodes: [URLError.cannotConnectToHost.rawValue]) {
             return "connect_refused"
         }
         if inChain(urlCodes: [URLError.networkConnectionLost.rawValue])
             || inChain(posixCodes: [Int(ECONNRESET)]) {
             return "reset"
-        }
-        if inChain(posixCodes: [Int(EHOSTUNREACH), Int(ENETUNREACH)]) {
-            return "connect_error"
         }
         if inChain(urlCodes: [
             URLError.badServerResponse.rawValue,
@@ -319,21 +328,6 @@ enum ClientTelemetry {
     }
 }
 
-/// What the header assembly in `buildHeaders` should do for one attempt.
-/// Mirrors py `_set_recorder_header`: no recorder leaves caller-supplied
-/// headers untouched; an active recorder always owns `x-tr-client`, removing
-/// any caller-supplied value even when it emits nothing.
-enum TelemetryHeaderDirective {
-    /// No recorder (telemetry off, control plane, absolute fetch): leave
-    /// caller headers exactly as they were.
-    case passthrough
-    /// Recorder active but nothing to send (custom host, out-of-grammar):
-    /// strip any caller-supplied `x-tr-client`.
-    case suppress
-    /// Recorder active: strip caller-supplied values and send this one.
-    case emit(String)
-}
-
 /// Records the per-attempt facts of ONE logical inference call as the
 /// transport engine drives it, and derives each attempt's `x-tr-client`
 /// header. Mirrors the py `RequestRecorder`
@@ -351,6 +345,18 @@ final class RequestRecorder {
         var elapsedMs: Int
         var moved: Bool
     }
+
+    /// §3.2: `po` describes the previous FAILURE and its vocabulary is
+    /// `none | http_error | transport_error | timeout | stream_broken` —
+    /// deliberately excluding `ok` and `aborted`. A verdict-forced retry
+    /// (`x-should-retry: true` on a 2xx) really does produce a previous
+    /// attempt whose outcome is `ok`; emitting `po=ok` would be out of
+    /// vocabulary and the enclave drops the WHOLE header for it (the py
+    /// reference currently has that latent bug — ruled not to replicate).
+    /// Outcomes outside this set map to `none`.
+    private static let previousOutcomeVocabulary: Set<String> = [
+        "http_error", "transport_error", "timeout", "stream_broken"
+    ]
 
     let streaming: Bool
     private let now: () -> Double
@@ -402,7 +408,10 @@ final class RequestRecorder {
             let sinceFirstMs = ClientTelemetry.clampedMilliseconds(
                 (attemptStarted ?? firstStarted) - firstStarted
             )
-            pairs.append(("po", previous.outcome))
+            let previousOutcome = Self.previousOutcomeVocabulary.contains(previous.outcome)
+                ? previous.outcome
+                : "none"
+            pairs.append(("po", previousOutcome))
             pairs.append(("pc", previous.errorClass ?? "none"))
             pairs.append(("ph", previous.host))
             pairs.append(("pm", String(previous.elapsedMs)))
@@ -413,12 +422,6 @@ final class RequestRecorder {
             pairs.append(("fo", failoverUsed ? "1" : "0"))
         }
         return ClientTelemetry.assembleHeaderLine(pairs)
-    }
-
-    /// `headerValue()` lifted into the directive `buildHeaders` consumes.
-    func headerDirective() -> TelemetryHeaderDirective {
-        if let value = headerValue() { return .emit(value) }
-        return .suppress
     }
 
     /// Record an attempt that produced an HTTP response (any status).

@@ -139,6 +139,41 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         )
     }
 
+    func testVerdictForcedRetryAfterOkCarriesPoNone() async throws {
+        // x-should-retry: true on a 2xx forces a retry (engine invariant 4),
+        // so the previous attempt's outcome really is `ok` — which is NOT in
+        // §3.2's po vocabulary. The header must say po=none, never po=ok
+        // (the enclave would drop the whole header for it).
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [
+            .labelled(200, "{}", ["x-should-retry": "true"]),
+            .response(200, "{}"),
+        ]
+        let router = try makeRouter(maxRetries: 1)
+
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders.count, 2)
+        assertMatches(
+            TelemetryCaptureProtocol.telemetryHeaders.last ?? nil,
+            "^v=1;a=1;po=none;pc=none;ph=apex;pm=[0-9]{1,7};sm=[0-9]{1,7};s=0;fo=0$"
+        )
+    }
+
+    func testPreviousOkMapsToPoNoneInTheRecorder() {
+        var clock = 0.0
+        let recorder = RequestRecorder(streaming: false, now: { clock })
+        recorder.beginAttempt(baseURL: TrustedRouterConstants.defaultAPIBaseURL)
+        clock = 1.0005
+        recorder.onResponse(statusCode: 200)
+        clock = 2.0005
+        recorder.beginAttempt(baseURL: TrustedRouterConstants.defaultAPIBaseURL)
+        XCTAssertEqual(
+            recorder.headerValue(),
+            "v=1;a=1;po=none;pc=none;ph=apex;pm=1000;sm=2000;s=0;fo=0"
+        )
+    }
+
     func testAttemptZeroGoldenVectorsFromTheRecorder() {
         let streaming = RequestRecorder(streaming: true, now: { 0 })
         streaming.beginAttempt(baseURL: TrustedRouterConstants.defaultAPIBaseURL)
@@ -177,16 +212,22 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.requestedHosts, ["trustedrouter.com"])
     }
 
-    func testRawRequestNeverEmitsTelemetry() async throws {
+    func testRawRequestNeverEmitsTelemetryAndStripsForgedValues() async throws {
         // rawRequest is single-shot by contract and reserved as the beacon
-        // attach point (§6.1) — it must not grow a header in this PR.
+        // attach point (§6.1) — it must not grow a header in this PR, and a
+        // forged reserved header must not ride it either.
         TelemetryCaptureProtocol.reset()
-        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}"), .response(200, "{}")]
         let router = try makeRouter(telemetry: true)
 
         _ = try await router.rawRequest(method: "GET", path: "/x")
+        _ = try await router.rawRequest(
+            method: "GET",
+            path: "/x",
+            options: PerCallOptions(extraHeaders: ["X-Tr-Client": "v=1;a=5;s=1"])
+        )
 
-        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, nil])
     }
 
     func testAbsoluteURLFetchSendsNoHeader() async throws {
@@ -221,14 +262,14 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"])
     }
 
-    func testWithoutARecorderCallerHeadersPassThroughUnchanged() async throws {
-        // Mirrors py _set_recorder_header exactly: the SDK owns x-tr-client
-        // only while a recorder is active. With telemetry off the header
-        // layer is the caller's business (they could set it with curl too);
-        // the enclave validates and drops bad values without failing the
-        // request (§3.1).
+    func testReservedHeaderIsStrippedEvenWhenTelemetryIsOff() async throws {
+        // x-tr-client is SDK-reserved on every path (ruled stronger than the
+        // py reference, whose stripping is recorder-scoped): an opted-out
+        // client must not let a caller-supplied value ride along, in any
+        // casing — otherwise opt-out, the control-plane exclusion, and the
+        // custom-base exclusion could all be bypassed from the header layer.
         TelemetryCaptureProtocol.reset()
-        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}"), .response(200, "{}")]
         let router = try makeRouter(telemetry: false)
 
         let _: EmptyResponse = try await router.request(
@@ -236,8 +277,28 @@ final class ClientTelemetryHeaderTests: XCTestCase {
             path: "/x",
             options: PerCallOptions(extraHeaders: ["x-tr-client": "v=1;a=3;s=1"])
         )
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "/x",
+            headers: ["X-TR-CLIENT": "v=1;a=4;s=0"]
+        )
 
-        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=3;s=1"])
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, nil])
+    }
+
+    func testControlPlaneCallStripsForgedReservedHeaders() async throws {
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        let router = try makeRouter(telemetry: true)
+
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "/auth/session",
+            options: PerCallOptions(extraHeaders: ["X-Tr-Client": "v=1;a=2;s=1"]),
+            plane: .control
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
     }
 
     func testNoTelemetryHTTPCallsExist() async throws {
@@ -383,6 +444,35 @@ final class ClientTelemetryHeaderTests: XCTestCase {
             "connect_timeout"
         )
 
+        XCTAssertEqual(
+            classify(NSError(domain: NSPOSIXErrorDomain, code: Int(ENETUNREACH))),
+            "connect_error"
+        )
+
+        // POSIX detail outranks the coarse URLError bucket: the same
+        // .cannotConnectToHost is connect_refused bare, but connect_error
+        // when the surviving errno says the host was unreachable.
+        let unreachable = NSError(
+            domain: NSURLErrorDomain,
+            code: URLError.cannotConnectToHost.rawValue,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(EHOSTUNREACH)
+                ),
+            ]
+        )
+        XCTAssertEqual(classify(unreachable), "connect_error")
+        let refused = NSError(
+            domain: NSURLErrorDomain,
+            code: URLError.cannotConnectToHost.rawValue,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ECONNREFUSED)
+                ),
+            ]
+        )
+        XCTAssertEqual(classify(refused), "connect_refused")
+
         // The class survives one level of wrapping — the underlying-error
         // chain is walked exactly like py's __cause__/__context__ chain.
         let wrapped = NSError(
@@ -392,6 +482,26 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         )
         XCTAssertEqual(classify(wrapped), "dns")
         XCTAssertEqual(classify(NSError(domain: "Opaque", code: 1)), "unknown")
+
+        // Chain walking is depth-capped and never loops: a deep chain still
+        // classifies within the first six errors, and one past the cap does
+        // not (falls to unknown rather than walking forever).
+        func nest(_ error: NSError, depth: Int) -> NSError {
+            var current = error
+            for level in 0..<depth {
+                current = NSError(
+                    domain: "Wrap\(level)",
+                    code: level,
+                    userInfo: [NSUnderlyingErrorKey: current]
+                )
+            }
+            return current
+        }
+        let posixReset = NSError(domain: NSPOSIXErrorDomain, code: Int(ECONNRESET))
+        XCTAssertEqual(classify(nest(posixReset, depth: 5)), "reset",
+                       "five wrappers plus the leaf is exactly the depth cap")
+        XCTAssertEqual(classify(nest(posixReset, depth: 6)), "unknown",
+                       "beyond the six-error cap the walk stops, mirroring py")
     }
 
     func testTimeoutOutcomeIsDecidedByTheTopLevelError() {
@@ -493,6 +603,7 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
     enum Outcome {
         case response(Int, String)
+        case labelled(Int, String, [String: String])
         case failure(URLError)
     }
 
@@ -530,15 +641,23 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         case .failure(let error):
             client?.urlProtocol(self, didFailWithError: error)
         case .response(let status, let body):
-            let response = HTTPURLResponse(
-                url: request.url ?? URL(string: "https://invalid.local")!,
-                statusCode: status,
-                httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "application/json"]
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: Data(body.utf8))
-            client?.urlProtocolDidFinishLoading(self)
+            respond(status: status, body: body, extraHeaders: [:])
+        case .labelled(let status, let body, let extraHeaders):
+            respond(status: status, body: body, extraHeaders: extraHeaders)
         }
+    }
+
+    private func respond(status: Int, body: String, extraHeaders: [String: String]) {
+        var fields = ["Content-Type": "application/json"]
+        for (name, value) in extraHeaders { fields[name] = value }
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://invalid.local")!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: fields
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
     }
 }

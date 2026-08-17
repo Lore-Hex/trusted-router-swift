@@ -102,7 +102,7 @@ public final class TrustedRouter: Sendable {
         idempotencyKey: String? = nil,
         apiKey: String? = nil,
         workspaceId: String? = nil,
-        telemetryHeader: TelemetryHeaderDirective = .passthrough
+        telemetryHeaderValue: String? = nil
     ) -> [String: String] {
         var out = ["user-agent": TrustedRouter.userAgent]
         for (k, v) in self.defaultHeaders { out[k] = v }
@@ -122,19 +122,16 @@ public final class TrustedRouter: Sendable {
             out["authorization"] = "Bearer \(bearer)"
         }
         // x-tr-client assembly (client-telemetry contract v1 §6.1: this is
-        // the swift header-assembly site). An active recorder owns the
-        // header outright — caller-supplied values are removed in every
-        // case-variant so a stale or forged value cannot ride along — while
-        // `.passthrough` (no recorder: telemetry off, control plane,
-        // `rawRequest`) leaves caller headers untouched.
-        switch telemetryHeader {
-        case .passthrough:
-            break
-        case .suppress:
-            out = out.filter { $0.key.lowercased() != "x-tr-client" }
-        case .emit(let value):
-            out = out.filter { $0.key.lowercased() != "x-tr-client" }
-            out["x-tr-client"] = value
+        // the swift header-assembly site). The header is SDK-RESERVED:
+        // caller-supplied values are stripped in every case-variant on EVERY
+        // path — opted-out, control-plane, custom-base, and `rawRequest`
+        // included — so a stale or forged value can never ride a request the
+        // SDK decided not to describe. (Ruled stronger than the py
+        // reference, whose stripping is recorder-scoped.) Only the engine's
+        // recorder may put a value here.
+        out = out.filter { $0.key.lowercased() != "x-tr-client" }
+        if let telemetryHeaderValue {
+            out["x-tr-client"] = telemetryHeaderValue
         }
         return out
     }

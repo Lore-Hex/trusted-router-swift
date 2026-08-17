@@ -117,7 +117,7 @@ extension TrustedRouter {
                 headers: headers,
                 options: effectiveOptions,
                 body: body,
-                telemetryHeader: recorder?.headerDirective() ?? .passthrough
+                telemetryHeaderValue: recorder?.headerValue()
             )
 
             let retryAfterSeconds: Double?
@@ -187,7 +187,7 @@ extension TrustedRouter {
         headers: [String: String]?,
         options: PerCallOptions,
         body: Data?,
-        telemetryHeader: TelemetryHeaderDirective = .passthrough
+        telemetryHeaderValue: String? = nil
     ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -201,7 +201,7 @@ extension TrustedRouter {
             idempotencyKey: options.idempotencyKey,
             apiKey: options.apiKey,
             workspaceId: options.workspaceId,
-            telemetryHeader: telemetryHeader
+            telemetryHeaderValue: telemetryHeaderValue
         )
         for (name, value) in requestHeaders {
             request.setValue(value, forHTTPHeaderField: name)
