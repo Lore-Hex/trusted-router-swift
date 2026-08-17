@@ -208,11 +208,18 @@ enum ClientTelemetry {
     /// the flatten to `TrustedRouterError.internalError(localizedDescription)`
     /// discards everything but a message string (§6.1).
     ///
-    /// URLSession does not expose the timeout phase the way httpx does
-    /// (ConnectTimeout vs ReadTimeout are one `.timedOut`), so the split is
-    /// driven by whether response headers had been received: at the engine's
-    /// emit point `data(for:)`/`bytes(for:)` failed before any response, so
-    /// a timeout classifies as `connect_timeout`.
+    /// URLSession does not expose the timeout phase the way httpx does:
+    /// ConnectTimeout and ReadTimeout are one `.timedOut`, and a failed
+    /// `data(for:)`/`bytes(for:)` surfaces no response/body state, so at the
+    /// engine's emit point `responseOpened` is always false. The split is
+    /// therefore best-effort BY DESIGN: a pre-response `.timedOut` — which
+    /// may genuinely be either a connect stall or a first-byte stall —
+    /// classifies as `connect_timeout`, a documented approximation (the
+    /// closed ErrorClass vocabulary has no phase-free timeout value, and
+    /// discarding the timeout signal as `unknown` would lose more than the
+    /// occasional misattributed phase). `responseOpened: true` exists for
+    /// callers that do know headers arrived (the later beacon PR's
+    /// stream-error path), yielding `read_timeout`.
     static func classifyTransportError(_ error: Error, responseOpened: Bool = false) -> String {
         let chain = errorChain(error)
 

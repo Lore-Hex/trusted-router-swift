@@ -177,6 +177,88 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.requestedHosts, ["trustedrouter.com"])
     }
 
+    func testRawRequestNeverEmitsTelemetry() async throws {
+        // rawRequest is single-shot by contract and reserved as the beacon
+        // attach point (§6.1) — it must not grow a header in this PR.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        let router = try makeRouter(telemetry: true)
+
+        _ = try await router.rawRequest(method: "GET", path: "/x")
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+    }
+
+    func testAbsoluteURLFetchSendsNoHeader() async throws {
+        // An absolute URL never resolves against the inference candidate
+        // list, so it gets no recorder even on the inference plane.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        let router = try makeRouter(telemetry: true)
+
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: TrustedRouterConstants.defaultStatusURL
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+        XCTAssertEqual(TelemetryCaptureProtocol.requestedHosts, ["status.trustedrouter.com"])
+    }
+
+    func testActiveRecorderOwnsTheHeaderAgainstForgedValues() async throws {
+        // A caller-supplied x-tr-client (any casing) must never ride along
+        // with an active recorder — the SDK's value replaces it outright.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        let router = try makeRouter(telemetry: true)
+
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "/x",
+            options: PerCallOptions(extraHeaders: ["X-TR-Client": "v=1;a=7;s=1"])
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"])
+    }
+
+    func testWithoutARecorderCallerHeadersPassThroughUnchanged() async throws {
+        // Mirrors py _set_recorder_header exactly: the SDK owns x-tr-client
+        // only while a recorder is active. With telemetry off the header
+        // layer is the caller's business (they could set it with curl too);
+        // the enclave validates and drops bad values without failing the
+        // request (§3.1).
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+        let router = try makeRouter(telemetry: false)
+
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "/x",
+            options: PerCallOptions(extraHeaders: ["x-tr-client": "v=1;a=3;s=1"])
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=3;s=1"])
+    }
+
+    func testNoTelemetryHTTPCallsExist() async throws {
+        // §6.4: the SDK's own fake transport sees zero /client-events calls.
+        // The beacon channel is deliberately absent from this PR; this pins
+        // that no code path grew a telemetry POST.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [
+            .failure(URLError(.timedOut)),
+            .response(200, "{}"),
+        ]
+        let router = try makeRouter(maxRetries: 1)
+
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+
+        XCTAssertTrue(
+            TelemetryCaptureProtocol.requestedPaths.allSatisfy { !$0.contains("client-events") },
+            "no beacon traffic may exist in the header-only PR: \(TelemetryCaptureProtocol.requestedPaths)"
+        )
+    }
+
     func testOptedOutClientSendsNoHeaderButKeepsUserAgent() async throws {
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
@@ -291,6 +373,14 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(
             classify(NSError(domain: NSPOSIXErrorDomain, code: Int(EPIPE))),
             "io_error"
+        )
+        XCTAssertEqual(
+            classify(NSError(domain: NSPOSIXErrorDomain, code: Int(EHOSTUNREACH))),
+            "connect_error"
+        )
+        XCTAssertEqual(
+            classify(NSError(domain: NSPOSIXErrorDomain, code: Int(ETIMEDOUT))),
+            "connect_timeout"
         )
 
         // The class survives one level of wrapping — the underlying-error
@@ -409,6 +499,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var scripted: [Outcome] = []
     nonisolated(unsafe) static var served = 0
     nonisolated(unsafe) static var requestedHosts: [String] = []
+    nonisolated(unsafe) static var requestedPaths: [String] = []
     nonisolated(unsafe) static var telemetryHeaders: [String?] = []
     nonisolated(unsafe) static var userAgents: [String?] = []
 
@@ -416,6 +507,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         scripted = []
         served = 0
         requestedHosts = []
+        requestedPaths = []
         telemetryHeaders = []
         userAgents = []
     }
@@ -426,6 +518,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         Self.requestedHosts.append(request.url?.host ?? "")
+        Self.requestedPaths.append(request.url?.path ?? "")
         Self.telemetryHeaders.append(request.value(forHTTPHeaderField: "x-tr-client"))
         Self.userAgents.append(request.value(forHTTPHeaderField: "user-agent"))
         let index = Self.served
