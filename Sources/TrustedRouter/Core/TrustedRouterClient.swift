@@ -35,6 +35,10 @@ public final class TrustedRouter: Sendable {
     /// The inference hosts used when the regional selector is off: the primary
     /// followed by its alias domains.
     let aliasBaseURLs: [String]
+    /// URL origins (scheme + host + effective port) that SDK-attached
+    /// credential headers may be sent to: the configured bases plus every
+    /// well-known TrustedRouter endpoint. See Transport/CredentialScope.swift.
+    let credentialHostAllowlist: CredentialHostAllowlist
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
         self.apiKey = options.apiKey
@@ -57,6 +61,9 @@ public final class TrustedRouter: Sendable {
             primaryBaseURL: self.baseUrl,
             // An explicit base URL is a pin: honour it even on the default host.
             regionalFailover: options.regionalFailover && options.baseUrl == nil
+        )
+        self.credentialHostAllowlist = CredentialHostAllowlist(
+            configuredBaseURLs: [self.baseUrl, self.controlBaseURL]
         )
         let affinityEnabled = options.regionalAffinity ?? (options.urlSession === URLSession.shared)
         if options.baseUrl == nil && options.regionalFailover && affinityEnabled {
@@ -96,42 +103,133 @@ public final class TrustedRouter: Sendable {
             + "\(os)/\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }
 
+    /// Case-insensitively set `name` to `value` in a header dictionary.
+    ///
+    /// HTTP header names are case-insensitive but `[String: String]` is not:
+    /// a plain subscript write can leave `user-agent` AND `User-Agent` side
+    /// by side, and because `URLRequest`'s own header store IS
+    /// case-insensitive, whichever entry dictionary iteration happens to
+    /// apply last silently wins. Removing every case-variant before writing
+    /// makes the last LAYER to set a name the deterministic winner. The
+    /// merged dictionary keeps the winning layer's spelling (the URL loading
+    /// system may still canonicalize casing on the wire). Layers are applied
+    /// in sorted key order, so even two case-variants inside ONE dictionary
+    /// resolve deterministically: the lexicographically last key's value
+    /// wins.
+    private static func setHeader(
+        _ headers: inout [String: String], name: String, value: String
+    ) {
+        removeHeader(&headers, name: name)
+        headers[name] = value
+    }
+
+    /// Remove every case-variant of `name`. The write half of `setHeader`
+    /// without the write — the one place case-insensitive removal lives, so
+    /// credential scoping and reserved-header stripping do not each carry
+    /// their own hand-rolled `lowercased()` match.
+    private static func removeHeader(
+        _ headers: inout [String: String], name: String
+    ) {
+        let target = name.lowercased()
+        for key in headers.keys where key.lowercased() == target {
+            headers.removeValue(forKey: key)
+        }
+    }
+
+    /// Case-insensitive lookup companion to `setHeader`.
+    private static func headerValue(
+        _ headers: [String: String], _ name: String
+    ) -> String? {
+        let target = name.lowercased()
+        for (key, value) in headers where key.lowercased() == target {
+            return value
+        }
+        return nil
+    }
+
+    /// Merge the header layers for one request. Later layers win, whatever
+    /// their casing: built-in `user-agent` < client `defaultHeaders` <
+    /// per-call `headers` < `extraHeaders` < computed idempotency/workspace.
+    /// The computed `authorization` is the one exception: it fills in from
+    /// the API key only when NO earlier layer supplied an authorization
+    /// header in any casing.
     func buildHeaders(
         headers: [String: String]? = nil,
         extraHeaders: [String: String]? = nil,
         idempotencyKey: String? = nil,
         apiKey: String? = nil,
         workspaceId: String? = nil,
+        includeCredentials: Bool = true,
         telemetryHeaderValue: String? = nil
     ) -> [String: String] {
+        // Each layer applies in sorted key order: dictionary iteration order
+        // is seeded per process, and letting it pick the survivor among
+        // same-layer case-variants would reintroduce (rarer) nondeterminism.
         var out = ["user-agent": TrustedRouter.userAgent]
-        for (k, v) in self.defaultHeaders { out[k] = v }
+        for (k, v) in self.defaultHeaders.sorted(by: { $0.key < $1.key }) {
+            Self.setHeader(&out, name: k, value: v)
+        }
+        // Credential scoping, part 1 (see Transport/CredentialScope.swift):
+        // client-wide default headers are configured once, for the client's
+        // own hosts — they are not authorization to credential whatever
+        // origin a caller-supplied absolute URL happens to name. The strip
+        // is case-insensitive because HTTP header names are; that now comes
+        // from the shared header container (`removeHeader`) rather than a
+        // second hand-rolled match. Iteration order over the name set is
+        // irrelevant: removing distinct header names commutes.
+        if !includeCredentials {
+            for name in TrustedRouter.credentialHeaderNames {
+                Self.removeHeader(&out, name: name)
+            }
+        }
+        // Explicit per-call headers are the caller naming a value alongside
+        // the URL they are naming, so they pass through untouched on every
+        // origin. Callers who must authenticate to a host the client is not
+        // configured for use these (or construct a client with that base).
         if let headers = headers {
-            for (k, v) in headers { out[k] = v }
+            for (k, v) in headers.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         if let extraHeaders = extraHeaders {
-            for (k, v) in extraHeaders { out[k] = v }
-        }
-        if let idempotencyKey = idempotencyKey {
-            out["idempotency-key"] = idempotencyKey
-        }
-        if let selectedWorkspaceId = workspaceId ?? self.workspaceId {
-            out["x-trustedrouter-workspace"] = selectedWorkspaceId
-        }
-        if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty, out["authorization"] == nil {
-            out["authorization"] = "Bearer \(bearer)"
+            for (k, v) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         // x-tr-client assembly (client-telemetry contract v1 §6.1: this is
         // the swift header-assembly site). The header is SDK-RESERVED:
         // caller-supplied values are stripped in every case-variant on EVERY
-        // path — opted-out, control-plane, custom-base, and `rawRequest`
-        // included — so a stale or forged value can never ride a request the
-        // SDK decided not to describe. (Ruled stronger than the py
-        // reference, whose stripping is recorder-scoped.) Only the engine's
-        // recorder may put a value here.
-        out = out.filter { $0.key.lowercased() != "x-tr-client" }
+        // path — opted-out, control-plane, custom-base, out-of-scope origin,
+        // and `rawRequest` included — so a stale or forged value can never
+        // ride a request the SDK decided not to describe. (Ruled stronger
+        // than the py reference, whose stripping is recorder-scoped.) Only
+        // the engine's recorder may put a value here.
+        //
+        // It sits ABOVE the credential-scoping return below, deliberately:
+        // that return is taken for exactly the out-of-scope origins a forged
+        // value would most want to ride, so a strip placed after it would
+        // leave one path unsanitised. Stripping is unconditional; only the
+        // SET is conditional on an active recorder. Case-insensitivity comes
+        // from the shared header container, so this name needs no
+        // hand-rolled matching of its own.
+        Self.removeHeader(&out, name: "x-tr-client")
         if let telemetryHeaderValue {
-            out["x-tr-client"] = telemetryHeaderValue
+            Self.setHeader(&out, name: "x-tr-client", value: telemetryHeaderValue)
+        }
+        // Credential scoping, part 2: the three headers the SDK attaches from
+        // its own stored configuration — `idempotency-key`,
+        // `x-trustedrouter-workspace`, and the Bearer `authorization` — are
+        // only injected for in-scope origins.
+        guard includeCredentials else { return out }
+        if let idempotencyKey = idempotencyKey {
+            Self.setHeader(&out, name: "idempotency-key", value: idempotencyKey)
+        }
+        if let selectedWorkspaceId = workspaceId ?? self.workspaceId {
+            Self.setHeader(&out, name: "x-trustedrouter-workspace", value: selectedWorkspaceId)
+        }
+        if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty,
+           Self.headerValue(out, "authorization") == nil {
+            Self.setHeader(&out, name: "authorization", value: "Bearer \(bearer)")
         }
         return out
     }

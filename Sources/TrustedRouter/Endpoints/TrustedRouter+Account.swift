@@ -48,8 +48,37 @@ extension TrustedRouter {
     }
 
     public func status(url: String = TrustedRouterConstants.defaultStatusURL) async throws -> [String: Any] {
+        // The status page is a public, unauthenticated document, so this is a
+        // single-shot request that carries none of the SDK-attached credential
+        // headers, like the Attestation/ fetchers (`attestation()`,
+        // `fetchTrustRelease`) rather than the credentialed `request<T>` path.
+        // Mirrors trusted-router-py, where `status()` is a bare
+        // `self._client.get(url)` on the raw HTTP client — single-shot, and
+        // never touching the `authorization` / workspace / idempotency headers
+        // that live only inside py's `_request`. The account's bearer token is
+        // never sent to a status host, not even the default TrustedRouter one.
+        //
+        // Client-wide *non*-credential defaults (tracing, proxy routing) do
+        // still apply, exactly as on every other request this client makes.
+        guard let statusURL = URL(string: url) else {
+            throw TrustedRouterError.internalError("Invalid status URL: \(url)")
+        }
+        var req = URLRequest(url: statusURL)
+        // Client-wide default headers (tracing, proxy routing) still apply;
+        // only the credential headers are withheld, on every host.
+        for (name, value) in buildHeaders(includeCredentials: false) {
+            req.setValue(value, forHTTPHeaderField: name)
+        }
+
+        let (data, response) = try await urlSession.data(for: req)
+        let httpResponse = try Self.httpOnly(response)
+        if httpResponse.statusCode >= 400 {
+            // Reuse the shared classifier so the public error taxonomy
+            // (.authentication / .rateLimit with Retry-After / …) and the
+            // server's message and payload survive this path.
+            throw classifyError(statusCode: httpResponse.statusCode, data: data, response: httpResponse)
+        }
         // Return raw dict for status as it's highly dynamic
-        let data: Data = try await request(method: "GET", path: url)
         if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return dict
         }

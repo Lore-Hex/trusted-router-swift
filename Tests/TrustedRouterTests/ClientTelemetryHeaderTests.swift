@@ -286,6 +286,34 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, nil])
     }
 
+    func testOutOfScopeAbsoluteURLStripsForgedReservedHeaders() async throws {
+        // The credential-scoping merge hazard, pinned. Credential scoping
+        // (Transport/CredentialScope.swift) returns EARLY from buildHeaders
+        // for an origin outside the TrustedRouter allowlist, so the reserved
+        // header's strip has to sit above that return. If it is ever moved
+        // below it, this is the one path that would still carry a forged
+        // x-tr-client — to a foreign host, which is the worst place to leak
+        // a retry history to. Every casing, both header layers.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}"), .response(200, "{}")]
+        let router = try makeRouter(telemetry: true)
+
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "https://evil.example/collect.json",
+            options: PerCallOptions(extraHeaders: ["X-Tr-Client": "v=1;a=9;s=1"])
+        )
+        let _: EmptyResponse = try await router.request(
+            method: "GET",
+            path: "https://evil.example/collect.json",
+            headers: ["x-TR-client": "v=1;a=8;s=0"]
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, nil])
+        XCTAssertEqual(TelemetryCaptureProtocol.requestedHosts,
+                       ["evil.example", "evil.example"])
+    }
+
     func testControlPlaneCallStripsForgedReservedHeaders() async throws {
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [.response(200, "{}")]

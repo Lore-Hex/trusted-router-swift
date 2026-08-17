@@ -22,6 +22,15 @@ All notable changes to this SDK are documented here. Format roughly follows
   (`trusted-router-swift/SEMVER runtime/ver`): the old parenthesised
   `(macOS 14.6)` suffix fell outside the grammar the enclave parses, so the
   runtime information was silently dropped server-side.
+- Header layers now merge case-insensitively, so an override like
+  `User-Agent` or `Authorization` supplied in a different casing than the
+  SDK's lowercase keys deterministically wins by layer precedence
+  (built-ins < client defaults < per-call headers < extra headers <
+  computed) instead of depending on dictionary iteration order against
+  `URLRequest`'s case-insensitive header store. Layers apply in sorted key
+  order, so even two case-variants inside one dictionary resolve
+  deterministically. A caller-supplied authorization header in any casing
+  still suppresses the API-key-derived one.
 
 ## 0.6.1 — 2026-08-08
 
