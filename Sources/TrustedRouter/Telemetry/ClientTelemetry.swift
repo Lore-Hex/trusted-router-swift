@@ -234,16 +234,21 @@ enum ClientTelemetry {
             || inChain(posixCodes: [Int(ETIMEDOUT)]) {
             return responseOpened ? "read_timeout" : "connect_timeout"
         }
-        if inChain(urlCodes: [
+        var tlsCodes: Set<Int> = [
             URLError.secureConnectionFailed.rawValue,
             URLError.serverCertificateHasBadDate.rawValue,
             URLError.serverCertificateUntrusted.rawValue,
             URLError.serverCertificateHasUnknownRoot.rawValue,
             URLError.serverCertificateNotYetValid.rawValue,
             URLError.clientCertificateRejected.rawValue,
-            URLError.clientCertificateRequired.rawValue,
-            URLError.appTransportSecurityRequiresSecureConnection.rawValue
-        ]) {
+            URLError.clientCertificateRequired.rawValue
+        ]
+        #if !canImport(FoundationNetworking)
+        // App Transport Security is Darwin-only; the FoundationNetworking
+        // URLError has no such member.
+        tlsCodes.insert(URLError.appTransportSecurityRequiresSecureConnection.rawValue)
+        #endif
+        if inChain(urlCodes: tlsCodes) {
             return "tls"
         }
         if inChain(urlCodes: [
