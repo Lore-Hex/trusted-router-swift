@@ -102,7 +102,8 @@ final class RetryAndClassificationTests: XCTestCase {
         let apexRouter = try TrustedRouter(options: .init(
             apiKey: "test_key",
             urlSession: URLSession(configuration: config),
-            maxRetries: 2
+            maxRetries: 2,
+            telemetry: true
         ))
 
         SequenceProtocol.scripted = [
@@ -118,6 +119,27 @@ final class RetryAndClassificationTests: XCTestCase {
         XCTAssertEqual(
             SequenceProtocol.requestedHosts,
             ["api.trustedrouter.com", "api.allyrouter.com", "api.uptimerouter.com"]
+        )
+        // Client-telemetry contract v1 §6.4: each attempt describes the one
+        // before it. The alias attempt must carry po=http_error;ph=apex;fo=1;
+        // pm/sm are wall-clock and only pattern-checked here (the byte-exact
+        // vectors live in ClientTelemetryHeaderTests with an injected clock).
+        let headers = SequenceProtocol.telemetryHeaders
+        XCTAssertEqual(headers.count, 3)
+        XCTAssertEqual(headers.first ?? nil, "v=1;a=0;s=0")
+        XCTAssertNotNil(
+            (headers[1] ?? "").range(
+                of: "^v=1;a=1;po=http_error;pc=none;ph=apex;pm=[0-9]{1,7};sm=[0-9]{1,7};s=0;fo=1$",
+                options: .regularExpression
+            ),
+            "alias attempt must describe the apex 503: \(headers[1] ?? "nil")"
+        )
+        XCTAssertNotNil(
+            (headers[2] ?? "").range(
+                of: "^v=1;a=2;po=http_error;pc=none;ph=ally;pm=[0-9]{1,7};sm=[0-9]{1,7};s=0;fo=1$",
+                options: .regularExpression
+            ),
+            "second alias attempt must describe the ally 503: \(headers[2] ?? "nil")"
         )
     }
 
@@ -413,11 +435,13 @@ private final class SequenceProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var scripted: [(Int, String, String?)] = []
     nonisolated(unsafe) static var served: Int = 0
     nonisolated(unsafe) static var requestedHosts: [String] = []
+    nonisolated(unsafe) static var telemetryHeaders: [String?] = []
 
     static func reset() {
         scripted = []
         served = 0
         requestedHosts = []
+        telemetryHeaders = []
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -426,6 +450,7 @@ private final class SequenceProtocol: URLProtocol, @unchecked Sendable {
         if let host = request.url?.host {
             Self.requestedHosts.append(host)
         }
+        Self.telemetryHeaders.append(request.value(forHTTPHeaderField: "x-tr-client"))
         let idx = Self.served
         Self.served += 1
         let (code, body, retryAfter) = (idx < Self.scripted.count) ? Self.scripted[idx] : (500, "out of script", nil)

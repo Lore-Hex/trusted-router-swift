@@ -25,6 +25,11 @@ public final class TrustedRouter: Sendable {
     public let defaultHeaders: [String: String]
     public let maxRetries: Int
     public let regionalFailover: Bool
+    /// Whether this client emits the content-free `x-tr-client` reliability
+    /// header (client-telemetry contract v1 §6.3). Resolved once at
+    /// construction: explicit option > `TRUSTEDROUTER_TELEMETRY` >
+    /// `DO_NOT_TRACK` > default on only for known TrustedRouter hosts.
+    public let telemetryEnabled: Bool
     public let workspaceId: String?
     let regionalEndpointSelector: RegionalEndpointSelector?
     /// The inference hosts used when the regional selector is off: the primary
@@ -41,6 +46,12 @@ public final class TrustedRouter: Sendable {
         self.defaultHeaders = options.headers
         self.maxRetries = max(0, options.maxRetries)
         self.regionalFailover = options.regionalFailover
+        self.telemetryEnabled = ClientTelemetry.resolveEnabled(
+            explicit: options.telemetry,
+            baseURL: self.baseUrl,
+            controlBaseURL: self.controlBaseURL,
+            environment: ProcessInfo.processInfo.environment
+        )
         self.workspaceId = options.workspaceId
         self.aliasBaseURLs = aliasFailoverURLs(
             primaryBaseURL: self.baseUrl,
@@ -61,20 +72,28 @@ public final class TrustedRouter: Sendable {
 
     /// User-Agent string sent on every request. Includes the SDK version
     /// and the host OS/version so server-side logs can correlate by client.
+    ///
+    /// The shape is pinned by the client-telemetry contract (§3.1): the
+    /// enclave parses `trusted-router-swift/SEMVER( runtime/ver)?` with the
+    /// runtime token matching `[a-z]{1,10}/[0-9A-Za-z.+-]{1,24}`. The old
+    /// parenthesised `(macOS 14.6)` suffix fell outside that grammar, so the
+    /// runtime was dropped server-side; `macos/14.6.1` carries the same
+    /// information inside it.
     static var userAgent: String {
         #if os(macOS)
-        let os = "macOS"
+        let os = "macos"
         #elseif os(iOS)
-        let os = "iOS"
+        let os = "ios"
         #elseif os(tvOS)
-        let os = "tvOS"
+        let os = "tvos"
         #elseif os(watchOS)
-        let os = "watchOS"
+        let os = "watchos"
         #else
-        let os = "Linux"
+        let os = "linux"
         #endif
         let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "trusted-router-swift/\(TrustedRouterConstants.version) (\(os) \(v.majorVersion).\(v.minorVersion))"
+        return "trusted-router-swift/\(TrustedRouterConstants.version) "
+            + "\(os)/\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }
 
     func buildHeaders(
@@ -82,7 +101,8 @@ public final class TrustedRouter: Sendable {
         extraHeaders: [String: String]? = nil,
         idempotencyKey: String? = nil,
         apiKey: String? = nil,
-        workspaceId: String? = nil
+        workspaceId: String? = nil,
+        telemetryHeader: TelemetryHeaderDirective = .passthrough
     ) -> [String: String] {
         var out = ["user-agent": TrustedRouter.userAgent]
         for (k, v) in self.defaultHeaders { out[k] = v }
@@ -100,6 +120,21 @@ public final class TrustedRouter: Sendable {
         }
         if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty, out["authorization"] == nil {
             out["authorization"] = "Bearer \(bearer)"
+        }
+        // x-tr-client assembly (client-telemetry contract v1 §6.1: this is
+        // the swift header-assembly site). An active recorder owns the
+        // header outright — caller-supplied values are removed in every
+        // case-variant so a stale or forged value cannot ride along — while
+        // `.passthrough` (no recorder: telemetry off, control plane,
+        // `rawRequest`) leaves caller headers untouched.
+        switch telemetryHeader {
+        case .passthrough:
+            break
+        case .suppress:
+            out = out.filter { $0.key.lowercased() != "x-tr-client" }
+        case .emit(let value):
+            out = out.filter { $0.key.lowercased() != "x-tr-client" }
+            out["x-tr-client"] = value
         }
         return out
     }
@@ -170,7 +205,8 @@ public final class TrustedRouter: Sendable {
             plane: plane,
             headers: headers,
             body: body,
-            options: options
+            options: options,
+            streaming: true
         ) { request in
             #if os(Linux)
             let (data, response) = try await self.urlSession.data(for: request)
@@ -208,7 +244,8 @@ public final class TrustedRouter: Sendable {
             plane: plane,
             headers: headers,
             body: bodyData,
-            options: options
+            options: options,
+            streaming: false
         ) { request in
             let (data, response) = try await self.urlSession.data(for: request)
             return (data, try Self.httpOnly(response))

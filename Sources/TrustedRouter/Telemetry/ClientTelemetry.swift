@@ -1,0 +1,469 @@
+import Foundation
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
+
+// L7 data + L1 policy — client-observed reliability telemetry, HEADER CHANNEL
+// only. Implements contract v1 of docs/client-telemetry.md
+// (Lore-Hex/quill-router): the per-attempt `x-tr-client` header (§3.2), the
+// closed host/endpoint/outcome/error-class vocabularies (§5.2), transport
+// error classification, and the enable/disable precedence (§6.3). The beacon
+// channel (§4/§5) is deliberately NOT here — §9 step 7 and §10 defer beacons
+// in non-Python SDKs until the Python contract has been live and calibrated.
+// `rawRequest` is the out-of-engine single-shot precedent reserved as the
+// beacon sender's attach point (§6.1) and is untouched by this file.
+//
+// PRINCIPLES (§2, non-negotiable):
+//  - Content-free by construction: every emitted value is a closed enum or a
+//    clamped integer; an out-of-grammar or over-length header sends NOTHING.
+//  - Never on the money path: nothing in this file throws, traps, or fails a
+//    request. No force-unwraps; every Double→Int conversion is clamped and
+//    finite-checked first (`UInt64(someDouble)` trapping on a header-supplied
+//    infinity is exactly how this SDK once crashed — see RetryPolicy).
+//  - This file depends only on Foundation and Core/Constants.swift so it
+//    compiles standalone (the local toolchain cannot link SwiftPM; the
+//    verification harness compiles these two files directly).
+
+/// Contract v1 vocabulary and pure helpers for the client telemetry header.
+/// Pinned by `SDKParityContractTests` — these raw values are the cross-SDK
+/// wire vocabulary and must not change without a coordinated release.
+enum ClientTelemetry {
+
+    // MARK: - Parity constants (§6.4: pinned for the later beacon PR)
+
+    static let schemaVersion = 1
+    static let beaconPath = "/client-events"
+
+    /// Host enum (§5.2).
+    static let hosts: [String] = [
+        "apex",
+        "ally",
+        "uptime",
+        "us_central1",
+        "us_east4",
+        "europe_west4",
+        "control",
+        "custom"
+    ]
+
+    /// Endpoint enum (§5.2).
+    static let endpoints: [String] = [
+        "chat_completions",
+        "messages",
+        "responses",
+        "embeddings",
+        "images",
+        "videos",
+        "models",
+        "fusion",
+        "control_other",
+        "inference_other"
+    ]
+
+    /// Outcome enum (§5.2).
+    static let outcomes: [String] = [
+        "ok",
+        "http_error",
+        "transport_error",
+        "timeout",
+        "stream_broken",
+        "aborted"
+    ]
+
+    /// FinalOutcome enum (§5.2).
+    static let finalOutcomes: [String] = outcomes + ["exhausted"]
+
+    /// ErrorClass enum (§5.2).
+    static let errorClasses: [String] = [
+        "dns",
+        "tls",
+        "connect_refused",
+        "connect_timeout",
+        "connect_error",
+        "read_timeout",
+        "write_timeout",
+        "pool_timeout",
+        "protocol_error",
+        "reset",
+        "io_error",
+        "proxy_error",
+        "stream_stalled",
+        "unknown"
+    ]
+
+    /// Durations on the wire are clamped into `0...maxDurationMs` (§3.2).
+    static let maxDurationMs = 3_600_000
+
+    /// Whole-header byte budget (§3.2): above this, send nothing.
+    static let maxHeaderBytes = 160
+
+    // MARK: - Host mapping (§5.2)
+
+    /// Lowercased `(scheme, host)` of a URL, or nil when either is absent.
+    /// Mirrors py `_scheme_host`: an unparseable URL classifies as custom,
+    /// never throws.
+    static func schemeHost(_ url: String) -> (scheme: String, host: String)? {
+        guard let components = URLComponents(string: url),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              !host.isEmpty
+        else { return nil }
+        return (scheme, host)
+    }
+
+    /// True for `https://trustedrouter.com` or any subdomain — the only
+    /// control plane telemetry may default on for (§6.3).
+    static func isControlHost(_ url: String) -> Bool {
+        guard let (scheme, host) = schemeHost(url) else { return false }
+        return scheme == "https"
+            && (host == "trustedrouter.com" || host.hasSuffix(".trustedrouter.com"))
+    }
+
+    /// Map a base URL to the closed Host vocabulary (§5.2). Scheme AND host
+    /// must match the pinned constant (an `http://` apex is custom, exactly
+    /// as in the Python SDK); anything unrecognised is `custom`.
+    static func hostEnum(_ baseURL: String) -> String {
+        guard let pair = schemeHost(baseURL) else { return "custom" }
+        if matches(pair, TrustedRouterConstants.defaultAPIBaseURL) { return "apex" }
+        for (aliasURL, name) in zip(TrustedRouterConstants.aliasAPIBaseURLs, ["ally", "uptime"]) {
+            if matches(pair, aliasURL) { return name }
+        }
+        let regions = ["us_central1", "us_east4", "europe_west4"]
+        for (regionURL, name) in zip(TrustedRouterConstants.regionBaseURLs, regions) {
+            if matches(pair, regionURL) { return name }
+        }
+        if matches(pair, TrustedRouterConstants.defaultControlBaseURL) || isControlHost(baseURL) {
+            return "control"
+        }
+        return "custom"
+    }
+
+    private static func matches(_ pair: (scheme: String, host: String), _ constant: String) -> Bool {
+        guard let other = schemeHost(constant) else { return false }
+        return pair.scheme == other.scheme && pair.host == other.host
+    }
+
+    // MARK: - Enable/disable resolution (§6.3)
+
+    /// Opt-out precedence, mirroring py `resolve_telemetry_enabled`:
+    /// explicit argument > `TRUSTEDROUTER_TELEMETRY` > `DO_NOT_TRACK` >
+    /// default (on only when the inference base is a known TrustedRouter host
+    /// AND the control host is https trustedrouter.com or a subdomain).
+    /// The environment is an injected dictionary so tests never mutate
+    /// process state; callers pass `ProcessInfo.processInfo.environment`.
+    static func resolveEnabled(
+        explicit: Bool?,
+        baseURL: String,
+        controlBaseURL: String,
+        environment: [String: String]
+    ) -> Bool {
+        if let explicit { return explicit }
+        let configured = (environment["TRUSTEDROUTER_TELEMETRY"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if ["0", "false", "off", "no"].contains(configured) { return false }
+        if ["1", "true", "on", "yes"].contains(configured) { return true }
+        if (environment["DO_NOT_TRACK"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
+            return false
+        }
+        return hostEnum(baseURL) != "custom" && isControlHost(controlBaseURL)
+    }
+
+    // MARK: - Transport error classification (§5.2 ErrorClass)
+
+    /// The error and up to five underlying errors, cycle-safe. Mirrors py
+    /// `_exception_chain` walking `__cause__`/`__context__`.
+    static func errorChain(_ error: Error) -> [NSError] {
+        var chain: [NSError] = []
+        var current: NSError? = error as NSError
+        while let nsError = current, chain.count < 6 {
+            if chain.contains(where: { $0 === nsError }) { break }
+            chain.append(nsError)
+            current = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return chain
+    }
+
+    /// True only when the error ITSELF is a timeout (the outcome decision),
+    /// mirroring py's top-level `isinstance(exc, httpx.TimeoutException)` —
+    /// a timeout buried in the underlying chain still classifies as
+    /// `pc=connect_timeout` but records outcome `transport_error`, which is
+    /// exactly the combination in the contract's §3.2 retry example.
+    static func isTimeoutError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain
+            && nsError.code == URLError.timedOut.rawValue
+    }
+
+    /// Map a thrown transport error to the closed ErrorClass vocabulary
+    /// (§5.2). Must be called at the transport engine's bare `catch`, BEFORE
+    /// the flatten to `TrustedRouterError.internalError(localizedDescription)`
+    /// discards everything but a message string (§6.1).
+    ///
+    /// URLSession does not expose the timeout phase the way httpx does
+    /// (ConnectTimeout vs ReadTimeout are one `.timedOut`), so the split is
+    /// driven by whether response headers had been received: at the engine's
+    /// emit point `data(for:)`/`bytes(for:)` failed before any response, so
+    /// a timeout classifies as `connect_timeout`.
+    static func classifyTransportError(_ error: Error, responseOpened: Bool = false) -> String {
+        let chain = errorChain(error)
+
+        func inChain(urlCodes: Set<Int>) -> Bool {
+            chain.contains { $0.domain == NSURLErrorDomain && urlCodes.contains($0.code) }
+        }
+        func inChain(posixCodes: Set<Int>) -> Bool {
+            chain.contains { $0.domain == NSPOSIXErrorDomain && posixCodes.contains($0.code) }
+        }
+
+        if inChain(urlCodes: [URLError.timedOut.rawValue])
+            || inChain(posixCodes: [Int(ETIMEDOUT)]) {
+            return responseOpened ? "read_timeout" : "connect_timeout"
+        }
+        if inChain(urlCodes: [
+            URLError.secureConnectionFailed.rawValue,
+            URLError.serverCertificateHasBadDate.rawValue,
+            URLError.serverCertificateUntrusted.rawValue,
+            URLError.serverCertificateHasUnknownRoot.rawValue,
+            URLError.serverCertificateNotYetValid.rawValue,
+            URLError.clientCertificateRejected.rawValue,
+            URLError.clientCertificateRequired.rawValue,
+            URLError.appTransportSecurityRequiresSecureConnection.rawValue
+        ]) {
+            return "tls"
+        }
+        if inChain(urlCodes: [
+            URLError.cannotFindHost.rawValue,
+            URLError.dnsLookupFailed.rawValue
+        ]) {
+            return "dns"
+        }
+        if inChain(urlCodes: [URLError.cannotConnectToHost.rawValue])
+            || inChain(posixCodes: [Int(ECONNREFUSED)]) {
+            return "connect_refused"
+        }
+        if inChain(urlCodes: [URLError.networkConnectionLost.rawValue])
+            || inChain(posixCodes: [Int(ECONNRESET)]) {
+            return "reset"
+        }
+        if inChain(posixCodes: [Int(EHOSTUNREACH), Int(ENETUNREACH)]) {
+            return "connect_error"
+        }
+        if inChain(urlCodes: [
+            URLError.badServerResponse.rawValue,
+            URLError.cannotParseResponse.rawValue,
+            URLError.httpTooManyRedirects.rawValue,
+            URLError.redirectToNonExistentLocation.rawValue
+        ]) {
+            return "protocol_error"
+        }
+        if inChain(posixCodes: [Int(EPIPE), Int(EIO)]) {
+            return "io_error"
+        }
+        return "unknown"
+    }
+
+    // MARK: - Clamped conversions (never trap; §2.2)
+
+    /// Seconds → whole milliseconds clamped into `0...maxDurationMs`.
+    /// NaN/±infinity → 0. The range check happens on the Double BEFORE the
+    /// `Int(_:)` conversion, which would otherwise trap on out-of-range input.
+    static func clampedMilliseconds(_ seconds: Double) -> Int {
+        guard seconds.isFinite else { return 0 }
+        let milliseconds = seconds * 1000.0
+        guard milliseconds > 0 else { return 0 }
+        guard milliseconds < Double(maxDurationMs) else { return maxDurationMs }
+        return Int(milliseconds)
+    }
+
+    // MARK: - Header assembly (§3.2)
+
+    /// `value = [a-z0-9_]{1,24}`, checked without a regex allocation.
+    static func isValidHeaderValue(_ value: String) -> Bool {
+        let scalars = value.unicodeScalars
+        guard !scalars.isEmpty, scalars.count <= 24 else { return false }
+        return scalars.allSatisfy {
+            ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_"
+        }
+    }
+
+    /// Join `key=value` pairs with `;` and apply the §3.2 guards: ≤160 bytes
+    /// and every value matching `^[a-z0-9_]{1,24}$`. Everything is bounded by
+    /// construction upstream, but telemetry may never fail a request — so an
+    /// out-of-grammar value returns nil and the attempt sends no header.
+    static func assembleHeaderLine(_ pairs: [(key: String, value: String)]) -> String? {
+        let header = pairs.map { "\($0.key)=\($0.value)" }.joined(separator: ";")
+        guard header.utf8.count <= maxHeaderBytes,
+              pairs.allSatisfy({ isValidHeaderValue($0.value) })
+        else { return nil }
+        return header
+    }
+}
+
+/// What the header assembly in `buildHeaders` should do for one attempt.
+/// Mirrors py `_set_recorder_header`: no recorder leaves caller-supplied
+/// headers untouched; an active recorder always owns `x-tr-client`, removing
+/// any caller-supplied value even when it emits nothing.
+enum TelemetryHeaderDirective {
+    /// No recorder (telemetry off, control plane, absolute fetch): leave
+    /// caller headers exactly as they were.
+    case passthrough
+    /// Recorder active but nothing to send (custom host, out-of-grammar):
+    /// strip any caller-supplied `x-tr-client`.
+    case suppress
+    /// Recorder active: strip caller-supplied values and send this one.
+    case emit(String)
+}
+
+/// Records the per-attempt facts of ONE logical inference call as the
+/// transport engine drives it, and derives each attempt's `x-tr-client`
+/// header. Mirrors the py `RequestRecorder`
+/// begin_attempt / on_response / on_transport_error / on_moved /
+/// header_value flow. Created once per `withTransportRetries` call and
+/// touched only by that task; no locking needed.
+final class RequestRecorder {
+
+    struct Attempt {
+        var index: Int
+        var host: String
+        var outcome: String
+        var httpStatus: Int?
+        var errorClass: String?
+        var elapsedMs: Int
+        var moved: Bool
+    }
+
+    let streaming: Bool
+    private let now: () -> Double
+    private(set) var attempts: [Attempt] = []
+    private(set) var failoverUsed = false
+    private var firstStarted: Double?
+    private var attemptStarted: Double?
+    private var currentHost: String?
+    private var currentIndex: Int?
+
+    /// `now` is a monotonic seconds clock, injectable for deterministic
+    /// tests (mirroring py's use of `time.perf_counter`).
+    init(
+        streaming: Bool,
+        now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }
+    ) {
+        self.streaming = streaming
+        self.now = now
+    }
+
+    /// Call at the top of every engine iteration, before the request is
+    /// built, with the base URL this attempt will hit.
+    func beginAttempt(baseURL: String) {
+        let started = now()
+        if firstStarted == nil { firstStarted = started }
+        attemptStarted = started
+        currentHost = ClientTelemetry.hostEnum(baseURL)
+        currentIndex = attempts.count
+    }
+
+    /// The `x-tr-client` value for the current attempt, or nil when nothing
+    /// may be sent. Key order is fixed by §3.2: `v,a[,po,pc,ph,pm,sm],s[,fo]`
+    /// — the retry-context keys and `fo` appear only when the attempt index
+    /// is greater than zero. Never sent for a custom host (§3.2: a
+    /// self-hosted gateway is not TrustedRouter's to measure).
+    func headerValue() -> String? {
+        guard let index = currentIndex, let host = currentHost, host != "custom" else {
+            return nil
+        }
+        var pairs: [(key: String, value: String)] = [("v", "1"), ("a", String(index))]
+        if index > 0 {
+            guard let previous = attempts.last else { return nil }
+            let firstStarted = self.firstStarted ?? attemptStarted ?? now()
+            let sinceFirstMs = ClientTelemetry.clampedMilliseconds(
+                (attemptStarted ?? firstStarted) - firstStarted
+            )
+            pairs.append(("po", previous.outcome))
+            pairs.append(("pc", previous.errorClass ?? "none"))
+            pairs.append(("ph", previous.host))
+            pairs.append(("pm", String(previous.elapsedMs)))
+            pairs.append(("sm", String(sinceFirstMs)))
+        }
+        pairs.append(("s", streaming ? "1" : "0"))
+        if index > 0 {
+            pairs.append(("fo", failoverUsed ? "1" : "0"))
+        }
+        return ClientTelemetry.assembleHeaderLine(pairs)
+    }
+
+    /// `headerValue()` lifted into the directive `buildHeaders` consumes.
+    func headerDirective() -> TelemetryHeaderDirective {
+        if let value = headerValue() { return .emit(value) }
+        return .suppress
+    }
+
+    /// Record an attempt that produced an HTTP response (any status).
+    func onResponse(statusCode: Int) {
+        guard let started = attemptStarted, let host = currentHost else { return }
+        store(Attempt(
+            index: currentIndex ?? attempts.count,
+            host: host,
+            outcome: statusCode < 400 ? "ok" : "http_error",
+            httpStatus: statusCode,
+            errorClass: nil,
+            elapsedMs: ClientTelemetry.clampedMilliseconds(now() - started),
+            moved: false
+        ))
+    }
+
+    /// Record an attempt that threw before a usable response. Must be called
+    /// with the ORIGINAL error at the engine's bare `catch` — after the SDK
+    /// flattens it to a message string the class is unrecoverable (§6.1).
+    func onTransportError(
+        _ error: Error,
+        responseOpened: Bool = false,
+        bodyStarted: Bool = false
+    ) {
+        guard let started = attemptStarted, let host = currentHost else { return }
+        var errorClass = ClientTelemetry.classifyTransportError(
+            error,
+            responseOpened: responseOpened
+        )
+        let outcome: String
+        if ClientTelemetry.isTimeoutError(error) {
+            outcome = "timeout"
+            if bodyStarted { errorClass = "stream_stalled" }
+        } else if bodyStarted {
+            outcome = "stream_broken"
+        } else {
+            outcome = "transport_error"
+        }
+        store(Attempt(
+            index: currentIndex ?? attempts.count,
+            host: host,
+            outcome: outcome,
+            httpStatus: nil,
+            errorClass: errorClass,
+            elapsedMs: ClientTelemetry.clampedMilliseconds(now() - started),
+            moved: false
+        ))
+    }
+
+    /// Record that the candidate index advanced after the current attempt —
+    /// the fact behind both `fo=1` and the previous attempt's `moved`.
+    func onMoved() {
+        guard !attempts.isEmpty else { return }
+        attempts[attempts.count - 1].moved = true
+        failoverUsed = true
+    }
+
+    private func store(_ attempt: Attempt) {
+        if attempt.index < attempts.count {
+            attempts[attempt.index] = attempt
+        } else {
+            attempts.append(attempt)
+        }
+    }
+}

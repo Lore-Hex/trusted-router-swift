@@ -85,6 +85,12 @@ public struct TrustedRouterOptions {
     public var maxRetries: Int
     /// Retry eligible inference failures across the ranked regional gateways.
     public var regionalFailover: Bool
+    /// Content-free client reliability telemetry (the per-attempt
+    /// `x-tr-client` header). Nil applies the documented precedence:
+    /// `TRUSTEDROUTER_TELEMETRY` > `DO_NOT_TRACK` > default on only for the
+    /// known TrustedRouter inference and control hosts. Custom base URLs
+    /// never send the header regardless of this setting.
+    public var telemetry: Bool?
     /// Nil enables affinity for URLSession.shared and disables it for an
     /// injected session. Set explicitly to override that safe default.
     public var regionalAffinity: Bool?
@@ -99,6 +105,7 @@ public struct TrustedRouterOptions {
         workspaceId: String? = nil,
         maxRetries: Int = 2,
         regionalFailover: Bool = true,
+        telemetry: Bool? = nil,
         regionalAffinity: Bool? = nil,
         regionProbeTimeout: TimeInterval = TrustedRouterConstants.defaultRegionProbeTimeout
     ) {
@@ -110,6 +117,7 @@ public struct TrustedRouterOptions {
         self.workspaceId = workspaceId
         self.maxRetries = maxRetries
         self.regionalFailover = regionalFailover
+        self.telemetry = telemetry
         self.regionalAffinity = regionalAffinity
         self.regionProbeTimeout = regionProbeTimeout
     }

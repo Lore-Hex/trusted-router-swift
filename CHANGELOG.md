@@ -6,6 +6,23 @@ All notable changes to this SDK are documented here. Format roughly follows
 
 ## Unreleased
 
+### Added
+- Content-free client reliability telemetry, header channel only
+  (client-telemetry contract v1): every inference-plane attempt carries an
+  `x-tr-client` header describing the attempt index, the previous attempt's
+  outcome/class/host/timing, streaming, and failover use. Configured with the
+  new `TrustedRouterOptions.telemetry` option, honouring the documented
+  `TRUSTEDROUTER_TELEMETRY` > `DO_NOT_TRACK` precedence, defaulting on only
+  for known TrustedRouter hosts. Custom base URLs and control-plane calls
+  never send it; the beacon channel is deliberately deferred per the
+  contract's rollout order.
+
+### Fixed
+- The User-Agent now matches the contract §3.1 grammar
+  (`trusted-router-swift/SEMVER runtime/ver`): the old parenthesised
+  `(macOS 14.6)` suffix fell outside the grammar the enclave parses, so the
+  runtime information was silently dropped server-side.
+
 ## 0.6.1 — 2026-08-08
 
 ### Fixed
