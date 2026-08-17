@@ -84,6 +84,56 @@ public final class TrustedRouter: Sendable {
         return "trusted-router-swift/\(TrustedRouterConstants.version) (\(os) \(v.majorVersion).\(v.minorVersion))"
     }
 
+    /// Case-insensitively set `name` to `value` in a header dictionary.
+    ///
+    /// HTTP header names are case-insensitive but `[String: String]` is not:
+    /// a plain subscript write can leave `user-agent` AND `User-Agent` side
+    /// by side, and because `URLRequest`'s own header store IS
+    /// case-insensitive, whichever entry dictionary iteration happens to
+    /// apply last silently wins. Removing every case-variant before writing
+    /// makes the last LAYER to set a name the deterministic winner. The
+    /// merged dictionary keeps the winning layer's spelling (the URL loading
+    /// system may still canonicalize casing on the wire). Layers are applied
+    /// in sorted key order, so even two case-variants inside ONE dictionary
+    /// resolve deterministically: the lexicographically last key's value
+    /// wins.
+    private static func setHeader(
+        _ headers: inout [String: String], name: String, value: String
+    ) {
+        removeHeader(&headers, name: name)
+        headers[name] = value
+    }
+
+    /// Remove every case-variant of `name`. The write half of `setHeader`
+    /// without the write — the one place case-insensitive removal lives, so
+    /// credential scoping and reserved-header stripping do not each carry
+    /// their own hand-rolled `lowercased()` match.
+    private static func removeHeader(
+        _ headers: inout [String: String], name: String
+    ) {
+        let target = name.lowercased()
+        for key in headers.keys where key.lowercased() == target {
+            headers.removeValue(forKey: key)
+        }
+    }
+
+    /// Case-insensitive lookup companion to `setHeader`.
+    private static func headerValue(
+        _ headers: [String: String], _ name: String
+    ) -> String? {
+        let target = name.lowercased()
+        for (key, value) in headers where key.lowercased() == target {
+            return value
+        }
+        return nil
+    }
+
+    /// Merge the header layers for one request. Later layers win, whatever
+    /// their casing: built-in `user-agent` < client `defaultHeaders` <
+    /// per-call `headers` < `extraHeaders` < computed idempotency/workspace.
+    /// The computed `authorization` is the one exception: it fills in from
+    /// the API key only when NO earlier layer supplied an authorization
+    /// header in any casing.
     func buildHeaders(
         headers: [String: String]? = nil,
         extraHeaders: [String: String]? = nil,
@@ -92,17 +142,24 @@ public final class TrustedRouter: Sendable {
         workspaceId: String? = nil,
         includeCredentials: Bool = true
     ) -> [String: String] {
+        // Each layer applies in sorted key order: dictionary iteration order
+        // is seeded per process, and letting it pick the survivor among
+        // same-layer case-variants would reintroduce (rarer) nondeterminism.
         var out = ["user-agent": TrustedRouter.userAgent]
-        for (k, v) in self.defaultHeaders { out[k] = v }
+        for (k, v) in self.defaultHeaders.sorted(by: { $0.key < $1.key }) {
+            Self.setHeader(&out, name: k, value: v)
+        }
         // Credential scoping, part 1 (see Transport/CredentialScope.swift):
         // client-wide default headers are configured once, for the client's
         // own hosts — they are not authorization to credential whatever
-        // origin a caller-supplied absolute URL happens to name. Matched
-        // case-insensitively because HTTP header names are.
+        // origin a caller-supplied absolute URL happens to name. The strip
+        // is case-insensitive because HTTP header names are; that now comes
+        // from the shared header container (`removeHeader`) rather than a
+        // second hand-rolled match. Iteration order over the name set is
+        // irrelevant: removing distinct header names commutes.
         if !includeCredentials {
-            for name in out.keys
-            where TrustedRouter.credentialHeaderNames.contains(name.lowercased()) {
-                out.removeValue(forKey: name)
+            for name in TrustedRouter.credentialHeaderNames {
+                Self.removeHeader(&out, name: name)
             }
         }
         // Explicit per-call headers are the caller naming a value alongside
@@ -110,10 +167,14 @@ public final class TrustedRouter: Sendable {
         // origin. Callers who must authenticate to a host the client is not
         // configured for use these (or construct a client with that base).
         if let headers = headers {
-            for (k, v) in headers { out[k] = v }
+            for (k, v) in headers.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         if let extraHeaders = extraHeaders {
-            for (k, v) in extraHeaders { out[k] = v }
+            for (k, v) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         // Credential scoping, part 2: the three headers the SDK attaches from
         // its own stored configuration — `idempotency-key`,
@@ -121,13 +182,14 @@ public final class TrustedRouter: Sendable {
         // only injected for in-scope origins.
         guard includeCredentials else { return out }
         if let idempotencyKey = idempotencyKey {
-            out["idempotency-key"] = idempotencyKey
+            Self.setHeader(&out, name: "idempotency-key", value: idempotencyKey)
         }
         if let selectedWorkspaceId = workspaceId ?? self.workspaceId {
-            out["x-trustedrouter-workspace"] = selectedWorkspaceId
+            Self.setHeader(&out, name: "x-trustedrouter-workspace", value: selectedWorkspaceId)
         }
-        if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty, out["authorization"] == nil {
-            out["authorization"] = "Bearer \(bearer)"
+        if let bearer = apiKey ?? self.apiKey, !bearer.isEmpty,
+           Self.headerValue(out, "authorization") == nil {
+            Self.setHeader(&out, name: "authorization", value: "Bearer \(bearer)")
         }
         return out
     }
