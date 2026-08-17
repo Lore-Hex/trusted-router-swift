@@ -175,12 +175,17 @@ extension TrustedRouter {
         if let timeout = options.timeout {
             request.timeoutInterval = timeout
         }
+        // Credential scoping (see Transport/CredentialScope.swift): a URL on
+        // an unknown origin — reachable only through a caller-supplied
+        // absolute URL — gets a credential-free request. Relative paths
+        // resolve against configured or well-known bases and stay in scope.
         let requestHeaders = buildHeaders(
             headers: headers,
             extraHeaders: options.extraHeaders,
             idempotencyKey: options.idempotencyKey,
             apiKey: options.apiKey,
-            workspaceId: options.workspaceId
+            workspaceId: options.workspaceId,
+            includeCredentials: credentialHostAllowlist.allowsCredentials(for: url)
         )
         for (name, value) in requestHeaders {
             request.setValue(value, forHTTPHeaderField: name)

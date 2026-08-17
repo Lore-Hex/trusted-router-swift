@@ -48,8 +48,28 @@ extension TrustedRouter {
     }
 
     public func status(url: String = TrustedRouterConstants.defaultStatusURL) async throws -> [String: Any] {
+        // The status page is a public, unauthenticated document: build a
+        // bare, credential-free, single-shot request exactly like the
+        // Attestation/ fetchers (`attestation()`, `fetchTrustRelease`)
+        // instead of riding the credentialed `request<T>` path. This mirrors
+        // trusted-router-py, where `status()` rides the raw HTTP client and
+        // never sees the `authorization` / workspace / idempotency headers —
+        // the account's bearer token is never sent to a status host, not
+        // even the default TrustedRouter one.
+        guard let statusURL = URL(string: url) else {
+            throw TrustedRouterError.internalError("Invalid status URL: \(url)")
+        }
+        var req = URLRequest(url: statusURL)
+        req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
+
+        let (data, response) = try await urlSession.data(for: req)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw TrustedRouterError.internalError("Non-HTTP response")
+        }
+        if httpResponse.statusCode >= 400 {
+            throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Status fetch failed", payload: nil)
+        }
         // Return raw dict for status as it's highly dynamic
-        let data: Data = try await request(method: "GET", path: url)
         if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return dict
         }
