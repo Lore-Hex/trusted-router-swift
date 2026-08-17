@@ -30,6 +30,10 @@ public final class TrustedRouter: Sendable {
     /// The inference hosts used when the regional selector is off: the primary
     /// followed by its alias domains.
     let aliasBaseURLs: [String]
+    /// URL origins (scheme + host + effective port) that SDK-attached
+    /// credential headers may be sent to: the configured bases plus every
+    /// well-known TrustedRouter endpoint. See Transport/CredentialScope.swift.
+    let credentialHostAllowlist: CredentialHostAllowlist
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
         self.apiKey = options.apiKey
@@ -46,6 +50,9 @@ public final class TrustedRouter: Sendable {
             primaryBaseURL: self.baseUrl,
             // An explicit base URL is a pin: honour it even on the default host.
             regionalFailover: options.regionalFailover && options.baseUrl == nil
+        )
+        self.credentialHostAllowlist = CredentialHostAllowlist(
+            configuredBaseURLs: [self.baseUrl, self.controlBaseURL]
         )
         let affinityEnabled = options.regionalAffinity ?? (options.urlSession === URLSession.shared)
         if options.baseUrl == nil && options.regionalFailover && affinityEnabled {
@@ -82,16 +89,37 @@ public final class TrustedRouter: Sendable {
         extraHeaders: [String: String]? = nil,
         idempotencyKey: String? = nil,
         apiKey: String? = nil,
-        workspaceId: String? = nil
+        workspaceId: String? = nil,
+        includeCredentials: Bool = true
     ) -> [String: String] {
         var out = ["user-agent": TrustedRouter.userAgent]
         for (k, v) in self.defaultHeaders { out[k] = v }
+        // Credential scoping, part 1 (see Transport/CredentialScope.swift):
+        // client-wide default headers are configured once, for the client's
+        // own hosts — they are not authorization to credential whatever
+        // origin a caller-supplied absolute URL happens to name. Matched
+        // case-insensitively because HTTP header names are.
+        if !includeCredentials {
+            for name in out.keys
+            where TrustedRouter.credentialHeaderNames.contains(name.lowercased()) {
+                out.removeValue(forKey: name)
+            }
+        }
+        // Explicit per-call headers are the caller naming a value alongside
+        // the URL they are naming, so they pass through untouched on every
+        // origin. Callers who must authenticate to a host the client is not
+        // configured for use these (or construct a client with that base).
         if let headers = headers {
             for (k, v) in headers { out[k] = v }
         }
         if let extraHeaders = extraHeaders {
             for (k, v) in extraHeaders { out[k] = v }
         }
+        // Credential scoping, part 2: the three headers the SDK attaches from
+        // its own stored configuration — `idempotency-key`,
+        // `x-trustedrouter-workspace`, and the Bearer `authorization` — are
+        // only injected for in-scope origins.
+        guard includeCredentials else { return out }
         if let idempotencyKey = idempotencyKey {
             out["idempotency-key"] = idempotencyKey
         }

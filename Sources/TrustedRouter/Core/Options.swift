@@ -118,6 +118,15 @@ public struct TrustedRouterOptions {
 /// Per-call overrides on top of a `TrustedRouter` client's defaults. Useful
 /// for one-off API-key override, custom headers, an idempotency key, or a
 /// short per-request timeout.
+///
+/// `apiKey`, `workspaceId`, and `idempotencyKey` are credential values the SDK
+/// attaches as headers, so they are subject to credential scoping (see
+/// Transport/CredentialScope.swift): on a request whose absolute URL resolves
+/// to an origin outside the configured and well-known TrustedRouter API and
+/// control hosts, they are withheld rather than sent. To authenticate to
+/// another host deliberately, either construct a client whose `baseUrl` /
+/// `controlBaseURL` is that host, or pass the header yourself in
+/// `extraHeaders` — an explicitly named header is never withheld.
 public struct PerCallOptions {
     public var apiKey: String?
     public var extraHeaders: [String: String]?
