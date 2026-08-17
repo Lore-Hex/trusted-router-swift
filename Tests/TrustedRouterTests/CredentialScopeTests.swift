@@ -8,11 +8,18 @@ import FoundationNetworking
 
 // Credential scoping on absolute-URL fetches: the SDK-attached credential
 // headers (`authorization`, `x-trustedrouter-workspace`, `idempotency-key`)
-// are sent only to known TrustedRouter origins, and the status fetch is
-// credential-free everywhere — mirroring trusted-router-py, where `status()`
-// rides the raw HTTP client and the credential headers exist only inside
-// `_request`, which never sees an absolute URL. Wire tests ride the real
-// request path through `MockURLProtocol` (TrustedRouterEndpointTests.swift).
+// are sent only to the configured and well-known TrustedRouter API/control
+// origins, and the status fetch carries none of them anywhere — mirroring
+// trusted-router-py, where `status()` is a bare single-shot get on the raw
+// HTTP client and those headers exist only inside `_request`, which never
+// sees an absolute URL. Client-wide non-credential defaults still ride along
+// everywhere; scoping covers the three names the SDK attaches itself.
+//
+// Wire tests ride the real request path through `MockURLProtocol`
+// (TrustedRouterEndpointTests.swift). Where two mechanisms would mask each
+// other — the host allowlist already denies the status host, so it cannot
+// also witness the scheme check or the bare status fetcher — the test that
+// isolates each mechanism is called out in a comment.
 
 /// Attempt counter for the mock handler, which is invoked off the test's own
 /// task.
@@ -147,6 +154,29 @@ final class CredentialScopeTests: XCTestCase {
             return Self.ok(request, body: "{\"status\": \"ok\"}")
         }
         let dict = try await router.status(url: "https://status.example/custom.json")
+        XCTAssertEqual(dict["status"] as? String, "ok")
+    }
+
+    /// The status request is assembled through `buildHeaders`, so client-wide
+    /// non-credential defaults and the standard user-agent still apply — only
+    /// the credential names are withheld. Without this, reverting the status
+    /// fetch to a hand-rolled request carrying a bare version string would go
+    /// undetected.
+    func testStatusFetchKeepsClientWideNonCredentialDefaults() async throws {
+        let router = try TrustedRouter(options: TrustedRouterOptions(
+            apiKey: "test_key",
+            urlSession: session,
+            headers: ["x-trace-id": "keep-me"],
+            workspaceId: "test_workspace"
+        ))
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-trace-id"), "keep-me")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "user-agent"), TrustedRouter.userAgent)
+            return Self.ok(request, body: "{\"status\": \"ok\"}")
+        }
+        let dict = try await router.status()
         XCTAssertEqual(dict["status"] as? String, "ok")
     }
 
@@ -295,6 +325,8 @@ final class CredentialScopeTests: XCTestCase {
     func testHTTPSchemeOnTrustedRouterHostnameIsNotTrusted() async throws {
         // Every TrustedRouter endpoint constant is https; a plaintext
         // downgrade of the same hostname must not receive the bearer token.
+        // Uses the API host on purpose: on a host that is out of scope anyway
+        // (status, trust) the allowlist would mask the scheme check.
         MockURLProtocol.requestHandler = { request in
             XCTAssertNil(request.value(forHTTPHeaderField: "authorization"))
             XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"))
@@ -302,7 +334,7 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: "http://status.trustedrouter.com/status.json"
+            path: "http://api.trustedrouter.com/v1/models"
         )
     }
 
@@ -335,14 +367,21 @@ final class CredentialScopeTests: XCTestCase {
             baseUrl: "https://inference.test/v1",
             urlSession: session,
             headers: [
+                // Mixed casing on purpose: HTTP field names are
+                // case-insensitive, so the strip must be too.
                 "Authorization": "Bearer configured_default",
                 "X-TrustedRouter-Workspace": "configured_workspace",
+                "Idempotency-Key": "configured_key",
                 "x-trace-id": "keep-me"
             ]
         ))
         MockURLProtocol.requestHandler = { request in
             XCTAssertNil(request.value(forHTTPHeaderField: "authorization"))
             XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"))
+            // Covers `idempotency-key`'s membership in the strip set, which
+            // the per-call assertions cannot witness: those are stopped by the
+            // separate SDK-attached guard instead.
+            XCTAssertNil(request.value(forHTTPHeaderField: "idempotency-key"))
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-trace-id"), "keep-me")
             return Self.ok(request)
         }
@@ -417,10 +456,28 @@ final class CredentialScopeTests: XCTestCase {
         XCTAssertFalse(allows("ftp://api.trustedrouter.com/v1"))
 
         // Userinfo is refused outright, so no Foundation-version disagreement
-        // about which component is the authority can grant credentials.
+        // about which component is the authority can grant credentials. The
+        // first two would also be denied by the host comparison alone; the
+        // `user@api.trustedrouter.com` cases are the ones that isolate this
+        // guard, since their host IS an in-scope host.
         XCTAssertFalse(allows("https://api.trustedrouter.com@evil.example/"))
         XCTAssertFalse(allows("https://api.trustedrouter.com:x@evil.example/"))
         XCTAssertFalse(allows("https://user@api.trustedrouter.com/v1"))
         XCTAssertFalse(allows("https://user:pass@api.trustedrouter.com/v1"))
+        XCTAssertFalse(allows("https://user@api.trustedrouter.com@evil.example/v1"))
+
+        // Malformed and exotic authorities fail closed. These pin the
+        // predicate's behaviour on the inputs where Foundation versions are
+        // most likely to differ; CI only runs modern macOS and Linux, so the
+        // value here is the fail-closed default, not parser equivalence.
+        XCTAssertFalse(allows("https://[::1]/v1"))
+        XCTAssertFalse(allows("https://[::1]:443/v1"))
+        XCTAssertFalse(allows("https:///v1"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com:99999/v1"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com\t/v1"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com\n/v1"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com /v1"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com\\@evil.example/v1"))
+        XCTAssertFalse(allows("https://%61pi.trustedrouter.com.evil.example/v1"))
     }
 }

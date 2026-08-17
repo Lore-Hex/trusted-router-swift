@@ -40,11 +40,14 @@ struct CredentialHostAllowlist: Sendable {
         let port: Int
 
         /// Built from `URL`'s own accessors rather than a `URLComponents`
-        /// round-trip: `URL` is the object `URLSession` resolves the
-        /// connection from, so on the older Darwin releases this package
-        /// still supports — where `URL` uses legacy `NSURL` parsing and
-        /// `URLComponents` does not — the origin checked here is the origin
-        /// that gets connected to, not a second parser's opinion of it.
+        /// round-trip. `URL` is the object handed to `URLSession`, so this
+        /// reads the authority from the same value the transport is given
+        /// rather than from a second parse of the string — which matters on
+        /// the older Darwin releases this package supports, where `URL` uses
+        /// legacy `NSURL` parsing and `URLComponents` does not. It is not a
+        /// claim to model the transport's own resolution: the guarantee comes
+        /// from the exact-match allowlist plus the refusals below, which fail
+        /// closed on anything the two parsers could disagree about.
         init?(_ url: URL?) {
             guard let url else { return nil }
             // Userinfo is refused outright rather than ignored. A URL like
@@ -97,11 +100,21 @@ struct CredentialHostAllowlist: Sendable {
 }
 
 extension TrustedRouter {
-    /// The headers this SDK attaches from its own stored configuration. These
-    /// are the ones credential scoping withholds from out-of-scope origins;
-    /// a value the caller passes explicitly at the call site (in `headers:`
-    /// or `options.extraHeaders`) is the caller's own choice and passes
-    /// through untouched.
+    /// The header names this SDK attaches itself. Credential scoping withholds
+    /// exactly these from out-of-scope origins, whether the value came from
+    /// stored configuration (`apiKey`, `workspaceId`, the auto-minted
+    /// idempotency key) or from the client-wide `headers` default, because on
+    /// these three names the two are indistinguishable in intent.
+    ///
+    /// This is deliberately NOT a general denylist of sensitive-looking
+    /// headers. A client-wide `cookie` or `x-api-key` default is the caller's
+    /// own configuration for their own hosts and the SDK has no basis to guess
+    /// at its sensitivity, so it is left alone — as is any header the caller
+    /// names per call in `headers:` or `options.extraHeaders`, which is the
+    /// documented way to authenticate to an out-of-scope host on purpose.
+    /// Headers injected below this layer, via a caller-supplied
+    /// `URLSessionConfiguration.httpAdditionalHeaders`, are outside the SDK's
+    /// reach entirely.
     static let credentialHeaderNames: Set<String> = [
         "authorization",
         "x-trustedrouter-workspace",
