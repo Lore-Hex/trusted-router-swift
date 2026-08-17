@@ -270,15 +270,25 @@ enum ClientTelemetry {
         if inChain(posixCodes: [Int(ECONNREFUSED)]) {
             return "connect_refused"
         }
+        // A proven reset outranks the coarse connect bucket too, and for the
+        // same reason refusal does. Darwin reports a mid-connect reset as
+        // `.cannotConnectToHost` wrapping ECONNRESET, so testing the coarse
+        // bucket first would bury the specific signal — py orders
+        // ConnectionRefusedError, then ConnectionResetError, then
+        // httpx.ConnectError, and `pc` has to agree across SDKs or the
+        // per-class distributions stop being comparable.
+        if inChain(urlCodes: [URLError.networkConnectionLost.rawValue])
+            || inChain(posixCodes: [Int(ECONNRESET)]) {
+            return "reset"
+        }
+        // Unreachable host/network and a bare `.cannotConnectToHost` are both
+        // connect_error — py has no unreachable-specific branch, so these
+        // fall through its `httpx.ConnectError` arm to the same class.
         if inChain(posixCodes: [Int(EHOSTUNREACH), Int(ENETUNREACH)]) {
             return "connect_error"
         }
         if inChain(urlCodes: [URLError.cannotConnectToHost.rawValue]) {
             return "connect_error"
-        }
-        if inChain(urlCodes: [URLError.networkConnectionLost.rawValue])
-            || inChain(posixCodes: [Int(ECONNRESET)]) {
-            return "reset"
         }
         if inChain(urlCodes: [
             URLError.badServerResponse.rawValue,

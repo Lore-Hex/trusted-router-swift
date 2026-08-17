@@ -212,6 +212,30 @@ public final class TrustedRouter: Sendable {
         // SET is conditional on an active recorder. Case-insensitivity comes
         // from the shared header container, so this name needs no
         // hand-rolled matching of its own.
+        //
+        // KNOWN BOUNDARY — an injected session's own default headers. This
+        // strip covers the three layers the SDK merges: `defaultHeaders`,
+        // per-call `headers:`, and `options.extraHeaders`. It cannot cover
+        // `URLSessionConfiguration.httpAdditionalHeaders`, which the URL
+        // loading system merges AFTER the request leaves this function, for
+        // exactly the field names the request does not set. So a caller who
+        // puts `x-tr-client` in their own session configuration does get it
+        // on the wire on the paths where the SDK sets no value (opted out,
+        // control plane, custom base, absolute URL, `rawRequest`). Measured,
+        // not assumed. Two things bound it:
+        //   * When a recorder IS active the SDK's request-level value wins
+        //     outright, so the header the enclave attributes to this SDK can
+        //     never be spoofed on a described attempt (pinned by
+        //     `testActiveRecorderValueOverridesAnInjectedSessionDefault`).
+        //   * The only way to suppress a session default is to set the field
+        //     explicitly, and the sole suppressing value is an empty one —
+        //     which would put a bare `x-tr-client:` on EVERY excluded
+        //     request, including every opted-out one. That breaks §6.3
+        //     opt-out and §2.2 (the enclave would log an invalid header on
+        //     every request) to close a hole only the caller's own transport
+        //     configuration can open. Not worth the trade; documented
+        //     instead, as the same layer boundary already is for the
+        //     credential headers in Transport/CredentialScope.swift.
         Self.removeHeader(&out, name: "x-tr-client")
         if let telemetryHeaderValue {
             Self.setHeader(&out, name: "x-tr-client", value: telemetryHeaderValue)

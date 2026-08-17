@@ -314,6 +314,87 @@ final class ClientTelemetryHeaderTests: XCTestCase {
                        ["evil.example", "evil.example"])
     }
 
+    func testClientWideDefaultReservedHeaderIsStripped() async throws {
+        // The third merge layer: a forged value configured once on the client
+        // rather than per call. Covered separately because `defaultHeaders` is
+        // applied before the per-call layers and by a different loop.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}"), .response(200, "{}")]
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TelemetryCaptureProtocol.self]
+        let offRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            headers: ["X-Tr-Client": "v=1;a=6;s=1"],
+            telemetry: false
+        ))
+        let _: EmptyResponse = try await offRouter.request(method: "GET", path: "/x")
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+
+        // With telemetry on, the recorder's own value replaces it rather than
+        // appending a second case-variant.
+        let onRouter = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            headers: ["X-TR-CLIENT": "v=1;a=6;s=1"],
+            telemetry: true
+        ))
+        let _: EmptyResponse = try await onRouter.request(method: "GET", path: "/x")
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, "v=1;a=0;s=0"])
+    }
+
+    func testStreamRequestStripsForgedReservedHeaders() async throws {
+        // The streaming entry point takes its own route into the engine, so
+        // the strip is asserted on it directly and not by proxy.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "data: [DONE]\n\n")]
+        let router = try makeRouter(telemetry: false)
+
+        _ = try await router.rawStreamRequest(
+            method: "POST",
+            path: "/chat/completions",
+            body: Data("{}".utf8),
+            options: PerCallOptions(extraHeaders: ["X-Tr-Client": "v=1;a=4;s=1"])
+        )
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+    }
+
+    func testActiveRecorderValueOverridesAnInjectedSessionDefault() async throws {
+        // KNOWN BOUNDARY, pinned rather than papered over.
+        // `URLSessionConfiguration.httpAdditionalHeaders` is merged by the URL
+        // loading system AFTER the request leaves buildHeaders, for exactly
+        // the fields the request does not set — so a caller who configures
+        // their own session with `x-tr-client` does put it on the wire on the
+        // paths where the SDK sets nothing (opted out, control plane, custom
+        // base, absolute URL, rawRequest). The SDK cannot strip it there: the
+        // only suppressing value is an empty one, which would mean emitting a
+        // bare `x-tr-client:` on every excluded request and breaking §6.3
+        // opt-out to close a hole only the caller's own transport can open.
+        // See the boundary note in buildHeaders.
+        //
+        // What IS guaranteed, and asserted here: on a described attempt the
+        // SDK's request-level value wins outright, so the header the enclave
+        // attributes to this SDK can never be a caller's forgery.
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TelemetryCaptureProtocol.self]
+        config.httpAdditionalHeaders = ["x-tr-client": "v=1;a=77;forged"]
+        let router = try TrustedRouter(options: .init(
+            apiKey: "test_key",
+            urlSession: URLSession(configuration: config),
+            telemetry: true
+        ))
+
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"],
+                       "the recorder's value must win over a session default")
+    }
+
     func testControlPlaneCallStripsForgedReservedHeaders() async throws {
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
@@ -503,6 +584,42 @@ final class ClientTelemetryHeaderTests: XCTestCase {
             ]
         )
         XCTAssertEqual(classify(refused), "connect_refused")
+        // ...and `reset` when the surviving errno says the connection was
+        // reset mid-connect. py's order is ConnectionRefusedError, then
+        // ConnectionResetError, then httpx.ConnectError, so a reset under a
+        // connect error is `reset` there too; testing the coarse
+        // `.cannotConnectToHost` bucket before this one would report
+        // connect_error and put `pc` out of step with every other SDK.
+        let resetMidConnect = NSError(
+            domain: NSURLErrorDomain,
+            code: URLError.cannotConnectToHost.rawValue,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(ECONNRESET)
+                ),
+            ]
+        )
+        XCTAssertEqual(classify(resetMidConnect), "reset")
+        // Refusal still outranks reset when both errnos somehow appear, and
+        // the unreachable pair still loses to a proven reset — pinning the
+        // whole refused > reset > unreachable > coarse-bucket order, not just
+        // the one pair the fix moved.
+        let resetUnderUnreachable = NSError(
+            domain: NSURLErrorDomain,
+            code: URLError.cannotConnectToHost.rawValue,
+            userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ECONNRESET),
+                    userInfo: [
+                        NSUnderlyingErrorKey: NSError(
+                            domain: NSPOSIXErrorDomain, code: Int(EHOSTUNREACH)
+                        ),
+                    ]
+                ),
+            ]
+        )
+        XCTAssertEqual(classify(resetUnderUnreachable), "reset")
 
         // The class survives one level of wrapping — the underlying-error
         // chain is walked exactly like py's __cause__/__context__ chain.
@@ -624,6 +741,21 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertNotNil(
             agent.range(of: pattern, options: .regularExpression),
             "\(agent) drifted out of the §3.1 grammar the enclave parses"
+        )
+        // The grammar makes the runtime token optional, so matching it alone
+        // would also pass if the runtime were dropped again — which is the
+        // regression this PR exists to fix. Pin that the token is present and
+        // that the version really is the SDK's, not a placeholder.
+        XCTAssertNotNil(
+            agent.range(
+                of: "^trusted-router-swift/\(semver) [a-z]{1,10}/[0-9A-Za-z.+-]{1,24}$",
+                options: .regularExpression
+            ),
+            "the runtime token must be present, not just grammatical: \(agent)"
+        )
+        XCTAssertTrue(
+            agent.hasPrefix("trusted-router-swift/\(TrustedRouterConstants.version) "),
+            "the version must be the SDK's own: \(agent)"
         )
     }
 }
