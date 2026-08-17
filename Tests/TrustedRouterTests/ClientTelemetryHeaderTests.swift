@@ -403,8 +403,17 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
     func testUnrelatedSessionDefaultHeadersAreLeftAlone() async throws {
         // The refusal is narrow: it is about one reserved field, not a ban on
-        // configuring a session. Any other default header still works, and
-        // still reaches the wire.
+        // configuring a session. Any other default header is accepted and the
+        // SDK's own telemetry still works alongside it.
+        //
+        // Whether a session default actually reaches the wire is the URL
+        // loading system's business, not the SDK's, and the two platforms
+        // differ: Darwin merges `httpAdditionalHeaders` into the request the
+        // URLProtocol sees, corelibs-foundation does not. That difference is
+        // precisely why the reserved field is enforced at construction rather
+        // than by inspecting the wire — the constructor check behaves
+        // identically on both. So the wire assertion below is Darwin-only,
+        // where the leak it guards against is reachable.
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
 
@@ -419,9 +428,12 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
         let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
 
-        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"])
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"],
+                       "the SDK's own header must still be emitted alongside a session default")
+        #if !canImport(FoundationNetworking)
         XCTAssertEqual(TelemetryCaptureProtocol.corporateTraceHeaders, ["session-level"],
-                       "an unrelated session default must still ride the request")
+                       "on Darwin an unrelated session default must still ride the request")
+        #endif
     }
 
     func testControlPlaneCallStripsForgedReservedHeaders() async throws {
