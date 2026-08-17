@@ -262,8 +262,11 @@ enum ClientTelemetry {
         // when the underlying errno survives in the chain it says WHICH —
         // ECONNREFUSED is a live host refusing (connect_refused), while an
         // unreachable host or network is connect_error. Bare
-        // `.cannotConnectToHost` with no errno falls back to
-        // connect_refused, its overwhelmingly common cause.
+        // `.cannotConnectToHost` with no errno is an UNPROVEN connect
+        // failure and classifies connect_error, matching go/js/py where
+        // connect_refused is reserved for a proven refusal syscall —
+        // per-class distributions stay comparable across SDKs (both classes
+        // are tr_fault-equivalent under §8 either way).
         if inChain(posixCodes: [Int(ECONNREFUSED)]) {
             return "connect_refused"
         }
@@ -271,7 +274,7 @@ enum ClientTelemetry {
             return "connect_error"
         }
         if inChain(urlCodes: [URLError.cannotConnectToHost.rawValue]) {
-            return "connect_refused"
+            return "connect_error"
         }
         if inChain(urlCodes: [URLError.networkConnectionLost.rawValue])
             || inChain(posixCodes: [Int(ECONNRESET)]) {

@@ -415,7 +415,10 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(classify(URLError(.dnsLookupFailed)), "dns")
         XCTAssertEqual(classify(URLError(.secureConnectionFailed)), "tls")
         XCTAssertEqual(classify(URLError(.serverCertificateUntrusted)), "tls")
-        XCTAssertEqual(classify(URLError(.cannotConnectToHost)), "connect_refused")
+        // Bare .cannotConnectToHost is an UNPROVEN connect failure:
+        // connect_refused is reserved for a proven ECONNREFUSED (below),
+        // matching go/js/py so per-class distributions compare across SDKs.
+        XCTAssertEqual(classify(URLError(.cannotConnectToHost)), "connect_error")
         XCTAssertEqual(classify(URLError(.timedOut)), "connect_timeout")
         XCTAssertEqual(classify(URLError(.timedOut), responseOpened: true), "read_timeout")
         XCTAssertEqual(classify(URLError(.networkConnectionLost)), "reset")
