@@ -55,6 +55,38 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         )
     }
 
+    private func sessionDefaultingReservedHeader() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TelemetryCaptureProtocol.self]
+        config.httpAdditionalHeaders = ["X-Tr-Client": "v=1;a=77;forged"]
+        return URLSession(configuration: config)
+    }
+
+    private func assertReservedSessionDefaultError(
+        _ error: Error,
+        entryPoint: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let routerError = error as? TrustedRouterError,
+              case let .internalError(message) = routerError else {
+            XCTFail("expected .internalError, got \(error)", file: file, line: line)
+            return
+        }
+        XCTAssertTrue(
+            message.contains("X-Tr-Client"),
+            "the diagnostic must name the offending field: \(message)",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(
+            message.contains(entryPoint),
+            "the diagnostic must name the refusing entry point: \(message)",
+            file: file,
+            line: line
+        )
+    }
+
     // MARK: - §6.4: header on attempt 0, exact bytes
 
     func testAttemptZeroNonStreamingHeaderIsExactBytes() async throws {
@@ -399,6 +431,94 @@ final class ClientTelemetryHeaderTests: XCTestCase {
                 }
             }
         }
+    }
+
+    func testFetchTrustReleaseRefusesReservedSessionDefaultBeforeNetwork() async {
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, #"{"image_digest":"sha256:abc"}"#)]
+        let session = sessionDefaultingReservedHeader()
+
+        do {
+            _ = try await fetchTrustRelease(
+                trustUrl: "https://trust.test/release.json",
+                urlSession: session
+            )
+            XCTFail("expected a reserved-session-default refusal")
+        } catch {
+            assertReservedSessionDefaultError(error, entryPoint: "fetchTrustRelease")
+        }
+
+        XCTAssertEqual(
+            TelemetryCaptureProtocol.served,
+            0,
+            "the reserved session default must be refused before URLSession starts a request"
+        )
+    }
+
+    func testPolicyFromTrustReleaseChecksReservedSessionOnlyWhenFetching() async throws {
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, #"{"image_digest":"sha256:abc"}"#)]
+        let session = sessionDefaultingReservedHeader()
+
+        do {
+            _ = try await policyFromTrustRelease(
+                trustReleaseUrl: "https://trust.test/release.json",
+                urlSession: session
+            )
+            XCTFail("expected a reserved-session-default refusal on the fetching path")
+        } catch {
+            assertReservedSessionDefaultError(error, entryPoint: "policyFromTrustRelease")
+        }
+        XCTAssertEqual(TelemetryCaptureProtocol.served, 0)
+
+        // A supplied release makes this a pure policy conversion. The unused
+        // session must not be inspected or rejected on this offline path.
+        let policy = try await policyFromTrustRelease(
+            release: ["image_digest": "sha256:provided"],
+            urlSession: session
+        )
+        XCTAssertEqual(policy.imageDigests, ["sha256:provided"])
+        XCTAssertEqual(TelemetryCaptureProtocol.served, 0)
+    }
+
+    func testVerifyGatewayAttestationChecksReservedSessionOnlyWhenFetchingJWKS() async {
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, #"{"keys":[]}"#)]
+        let session = sessionDefaultingReservedHeader()
+        let parseableJWT = Data(
+            "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3QifQ.e30.AA".utf8
+        )
+        let policy = AttestationPolicy(imageDigest: "sha256:abc")
+
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: parseableJWT,
+                policy: policy,
+                jwksUrl: "https://jwks.test/keys.json",
+                urlSession: session
+            )
+            XCTFail("expected a reserved-session-default refusal on the JWKS fetching path")
+        } catch {
+            assertReservedSessionDefaultError(error, entryPoint: "verifyGatewayAttestation")
+        }
+        XCTAssertEqual(TelemetryCaptureProtocol.served, 0)
+
+        // Supplying JWKS makes the session irrelevant. Reaching the empty-key
+        // validation error proves this offline branch did not reject it.
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: parseableJWT,
+                policy: policy,
+                jwks: ["keys": [[String: Any]]()],
+                urlSession: session
+            )
+            XCTFail("expected empty JWKS validation to fail")
+        } catch let error as AttestationVerificationError {
+            XCTAssertTrue(error.message.contains("no JWK with kid=test"))
+        } catch {
+            XCTFail("the supplied-JWKS path must not inspect the session: \(error)")
+        }
+        XCTAssertEqual(TelemetryCaptureProtocol.served, 0)
     }
 
     func testUnrelatedSessionDefaultHeadersAreLeftAlone() async throws {
