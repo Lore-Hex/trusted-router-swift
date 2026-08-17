@@ -108,10 +108,16 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         )
     }
 
-    /// The contract's own §3.2 retry example, byte for byte, from the real
-    /// recorder with an injected clock: a connect timeout surfaced inside a
-    /// wrapped transport error (outcome transport_error, class
-    /// connect_timeout) on the apex, then a move to an alias.
+    /// The doc's §3.2 example string, byte for byte, from the real recorder
+    /// with an injected clock. NOTE the parity ruling: the doc's prose
+    /// ("retry after a connect timeout") contradicts the Python reference —
+    /// a plain connect timeout is outcome `timeout` there, so the engine
+    /// emits `po=timeout;pc=connect_timeout` for it (asserted in
+    /// testTransportTimeoutRetryCarriesPreviousAttemptContext, and the doc
+    /// carries the bug per its own "the modules win" header). The doc's
+    /// literal `po=transport_error;pc=connect_timeout` combination is
+    /// reachable only when the timeout is buried under a non-timeout
+    /// wrapper, which is how this vector constructs it.
     func testContractRetryExampleGoldenVector() {
         var clock = 0.0
         let recorder = RequestRecorder(streaming: true, now: { clock })
@@ -335,6 +341,19 @@ final class ClientTelemetryHeaderTests: XCTestCase {
             let value = String(pair.split(separator: "=", maxSplits: 1)[1])
             XCTAssertTrue(ClientTelemetry.isValidHeaderValue(value), "bad value \(value)")
         }
+    }
+
+    func testAttemptIndexPastTheContractCeilingSendsNothing() {
+        var clock = 0.0
+        let recorder = RequestRecorder(streaming: false, now: { clock })
+        for _ in 0..<100 {
+            recorder.beginAttempt(baseURL: TrustedRouterConstants.defaultAPIBaseURL)
+            clock += 1.0
+            recorder.onTransportError(URLError(.cannotConnectToHost))
+        }
+        recorder.beginAttempt(baseURL: TrustedRouterConstants.defaultAPIBaseURL)
+        XCTAssertNil(recorder.headerValue(),
+                     "a=100 is outside the contract's 0..99; send nothing rather than a droppable header")
     }
 
     func testOutOfGrammarValuesSendNothing() {

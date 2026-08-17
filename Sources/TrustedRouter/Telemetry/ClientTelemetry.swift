@@ -378,6 +378,11 @@ final class RequestRecorder {
         guard let index = currentIndex, let host = currentHost, host != "custom" else {
             return nil
         }
+        // The contract bounds `a` to 0..99 (§3.2). An index past that cannot
+        // be represented, so the attempt sends nothing — never a value the
+        // enclave would drop the whole header for. (Unreachable through the
+        // engine, whose retries are capped far below 99.)
+        guard index <= 99 else { return nil }
         var pairs: [(key: String, value: String)] = [("v", "1"), ("a", String(index))]
         if index > 0 {
             guard let previous = attempts.last else { return nil }
