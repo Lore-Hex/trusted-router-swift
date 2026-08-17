@@ -361,28 +361,56 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
     }
 
-    func testActiveRecorderValueOverridesAnInjectedSessionDefault() async throws {
-        // KNOWN BOUNDARY, pinned rather than papered over.
+    func testSessionCarryingTheReservedHeaderIsRefusedAtConstruction() throws {
+        // The fourth header layer, closed at the only end where it can be.
         // `URLSessionConfiguration.httpAdditionalHeaders` is merged by the URL
-        // loading system AFTER the request leaves buildHeaders, for exactly
-        // the fields the request does not set — so a caller who configures
-        // their own session with `x-tr-client` does put it on the wire on the
-        // paths where the SDK sets nothing (opted out, control plane, custom
-        // base, absolute URL, rawRequest). The SDK cannot strip it there: the
-        // only suppressing value is an empty one, which would mean emitting a
-        // bare `x-tr-client:` on every excluded request and breaking §6.3
-        // opt-out to close a hole only the caller's own transport can open.
-        // See the boundary note in buildHeaders.
-        //
-        // What IS guaranteed, and asserted here: on a described attempt the
-        // SDK's request-level value wins outright, so the header the enclave
-        // attributes to this SDK can never be a caller's forgery.
+        // loading system AFTER the request leaves buildHeaders, for exactly the
+        // fields the request does not set, and no request-level value can mark a
+        // field absent (an empty one is still a header on the wire, on every
+        // excluded request, which would break §6.3 opt-out). So a session
+        // carrying the reserved field would otherwise forge `x-tr-client` on
+        // every path the SDK deliberately does not describe. Construction is
+        // refused instead — every casing, since HTTP field names are
+        // case-insensitive.
+        for casing in ["x-tr-client", "X-Tr-Client", "X-TR-CLIENT"] {
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [TelemetryCaptureProtocol.self]
+            config.httpAdditionalHeaders = [casing: "v=1;a=77;forged"]
+            let session = URLSession(configuration: config)
+
+            // Refused whatever the telemetry setting: opting out must not be a
+            // way to smuggle the header back in.
+            for telemetry in [true, false, nil] as [Bool?] {
+                XCTAssertThrowsError(
+                    try TrustedRouter(options: .init(
+                        apiKey: "test_key",
+                        urlSession: session,
+                        telemetry: telemetry
+                    )),
+                    "a session defaulting \(casing) must be refused (telemetry: \(String(describing: telemetry)))"
+                ) { error in
+                    guard let routerError = error as? TrustedRouterError,
+                          case let .internalError(message) = routerError else {
+                        XCTFail("expected .internalError, got \(error)")
+                        return
+                    }
+                    XCTAssertTrue(message.contains(casing),
+                                  "the diagnostic must name the offending field: \(message)")
+                }
+            }
+        }
+    }
+
+    func testUnrelatedSessionDefaultHeadersAreLeftAlone() async throws {
+        // The refusal is narrow: it is about one reserved field, not a ban on
+        // configuring a session. Any other default header still works, and
+        // still reaches the wire.
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [.response(200, "{}")]
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TelemetryCaptureProtocol.self]
-        config.httpAdditionalHeaders = ["x-tr-client": "v=1;a=77;forged"]
+        config.httpAdditionalHeaders = ["x-corp-trace": "session-level"]
         let router = try TrustedRouter(options: .init(
             apiKey: "test_key",
             urlSession: URLSession(configuration: config),
@@ -391,8 +419,9 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
         let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
 
-        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"],
-                       "the recorder's value must win over a session default")
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, ["v=1;a=0;s=0"])
+        XCTAssertEqual(TelemetryCaptureProtocol.corporateTraceHeaders, ["session-level"],
+                       "an unrelated session default must still ride the request")
     }
 
     func testControlPlaneCallStripsForgedReservedHeaders() async throws {
@@ -776,6 +805,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var requestedPaths: [String] = []
     nonisolated(unsafe) static var telemetryHeaders: [String?] = []
     nonisolated(unsafe) static var userAgents: [String?] = []
+    nonisolated(unsafe) static var corporateTraceHeaders: [String?] = []
 
     static func reset() {
         scripted = []
@@ -784,6 +814,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         requestedPaths = []
         telemetryHeaders = []
         userAgents = []
+        corporateTraceHeaders = []
     }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -795,6 +826,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         Self.requestedPaths.append(request.url?.path ?? "")
         Self.telemetryHeaders.append(request.value(forHTTPHeaderField: "x-tr-client"))
         Self.userAgents.append(request.value(forHTTPHeaderField: "user-agent"))
+        Self.corporateTraceHeaders.append(request.value(forHTTPHeaderField: "x-corp-trace"))
         let index = Self.served
         Self.served += 1
         let outcome: Outcome = index < Self.scripted.count

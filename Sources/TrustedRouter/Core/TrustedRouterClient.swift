@@ -41,6 +41,32 @@ public final class TrustedRouter: Sendable {
     let credentialHostAllowlist: CredentialHostAllowlist
 
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
+        // x-tr-client is SDK-RESERVED (client-telemetry contract v1 §6.1): only
+        // the SDK's own recorder may set a value, on every path. Every header
+        // layer the SDK merges is stripped in `buildHeaders`; an injected
+        // session's `httpAdditionalHeaders` is the one layer it cannot reach,
+        // because the URL loading system merges that after the request leaves
+        // the SDK, for exactly the fields the request does not set. Left alone,
+        // such a value would ride every request the SDK deliberately does NOT
+        // describe — opted out, control plane, custom base, absolute URL,
+        // `rawRequest` — silently defeating telemetry opt-out and attributing a
+        // caller's forgery to this SDK. There is no request-level way to mark a
+        // field absent, so the session is refused here instead: a loud
+        // configuration error at construction, once, rather than a silent
+        // forgery on every call. Narrow by design — any other default header on
+        // the session is untouched.
+        if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(options.urlSession) {
+            throw TrustedRouterError.internalError(
+                "The URLSession passed to TrustedRouter sets the SDK-reserved header "
+                + "'\(reservedName)' in URLSessionConfiguration.httpAdditionalHeaders. "
+                + "That header is set only by the SDK's own telemetry recorder "
+                + "(client-telemetry contract v1 §6.1) and cannot be stripped from a "
+                + "session default, so this configuration is refused. Remove it from "
+                + "httpAdditionalHeaders; to disable client telemetry use "
+                + "TrustedRouterOptions.telemetry = false, TRUSTEDROUTER_TELEMETRY=0, "
+                + "or DO_NOT_TRACK=1."
+            )
+        }
         self.apiKey = options.apiKey
         // Strip any trailing slashes so the path-join in `requestURLString`
         // doesn't emit a double-slash URL.
@@ -213,32 +239,22 @@ public final class TrustedRouter: Sendable {
         // from the shared header container, so this name needs no
         // hand-rolled matching of its own.
         //
-        // KNOWN BOUNDARY — an injected session's own default headers. This
-        // strip covers the three layers the SDK merges: `defaultHeaders`,
-        // per-call `headers:`, and `options.extraHeaders`. It cannot cover
-        // `URLSessionConfiguration.httpAdditionalHeaders`, which the URL
-        // loading system merges AFTER the request leaves this function, for
-        // exactly the field names the request does not set. So a caller who
-        // puts `x-tr-client` in their own session configuration does get it
-        // on the wire on the paths where the SDK sets no value (opted out,
-        // control plane, custom base, absolute URL, `rawRequest`). Measured,
-        // not assumed. Two things bound it:
-        //   * When a recorder IS active the SDK's request-level value wins
-        //     outright, so the header the enclave attributes to this SDK can
-        //     never be spoofed on a described attempt (pinned by
-        //     `testActiveRecorderValueOverridesAnInjectedSessionDefault`).
-        //   * The only way to suppress a session default is to set the field
-        //     explicitly, and the sole suppressing value is an empty one —
-        //     which would put a bare `x-tr-client:` on EVERY excluded
-        //     request, including every opted-out one. That breaks §6.3
-        //     opt-out and §2.2 (the enclave would log an invalid header on
-        //     every request) to close a hole only the caller's own transport
-        //     configuration can open. Not worth the trade; documented
-        //     instead, as the same layer boundary already is for the
-        //     credential headers in Transport/CredentialScope.swift.
-        Self.removeHeader(&out, name: "x-tr-client")
+        // "EVERY path" is literal, and this strip is only half of how it is
+        // kept. It covers the three layers the SDK merges: `defaultHeaders`,
+        // per-call `headers:`, and `options.extraHeaders`. The fourth layer —
+        // an injected session's `URLSessionConfiguration.httpAdditionalHeaders`
+        // — is merged by the URL loading system AFTER the request leaves this
+        // function, for exactly the fields the request does not set, and no
+        // request-level value can mark a field absent. That layer is therefore
+        // closed at the other end: `init` refuses a session whose default
+        // headers name this field at all. Unlike the credential headers, whose
+        // §-documented boundary really does stop at the SDK's own layers, this
+        // one has no reachable exception.
+        Self.removeHeader(&out, name: ClientTelemetry.reservedHeaderName)
         if let telemetryHeaderValue {
-            Self.setHeader(&out, name: "x-tr-client", value: telemetryHeaderValue)
+            Self.setHeader(
+                &out, name: ClientTelemetry.reservedHeaderName, value: telemetryHeaderValue
+            )
         }
         // Credential scoping, part 2: the three headers the SDK attaches from
         // its own stored configuration — `idempotency-key`,

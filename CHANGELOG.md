@@ -16,6 +16,15 @@ All notable changes to this SDK are documented here. Format roughly follows
   for known TrustedRouter hosts. Custom base URLs and control-plane calls
   never send it; the beacon channel is deliberately deferred per the
   contract's rollout order.
+- `x-tr-client` is SDK-reserved: a caller-supplied value is stripped from
+  every header layer the SDK merges, and because a header set in an injected
+  session's `URLSessionConfiguration.httpAdditionalHeaders` is merged by the
+  URL loading system after the request leaves the SDK — where it cannot be
+  stripped — constructing a `TrustedRouter` with such a session now throws
+  rather than letting the value ride requests the SDK did not describe. Only
+  this one field name is rejected; any other session default header is
+  untouched. To turn telemetry off use `TrustedRouterOptions.telemetry`,
+  `TRUSTEDROUTER_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
 
 ### Fixed
 - The User-Agent now matches the contract §3.1 grammar

@@ -41,6 +41,33 @@ enum ClientTelemetry {
     static let schemaVersion = 1
     static let beaconPath = "/client-events"
 
+    /// The SDK-reserved header name (§6.1). Only an active recorder may set a
+    /// value for it, on every path.
+    static let reservedHeaderName = "x-tr-client"
+
+    /// The reserved field name present in an injected session's default
+    /// headers, in the caller's own spelling, or nil when there is none.
+    ///
+    /// `URLSessionConfiguration.httpAdditionalHeaders` is the one header layer
+    /// the SDK cannot strip: the URL loading system merges it AFTER the request
+    /// leaves `buildHeaders`, for exactly the field names the request does not
+    /// set, and there is no request-level way to mark a field explicitly absent
+    /// (the only suppressing value is an empty one, which would put a bare
+    /// `x-tr-client:` on every excluded request and break §6.3 opt-out). So a
+    /// session carrying the reserved field is refused at construction instead —
+    /// see `TrustedRouter.init`. Matched case-insensitively, and only `String`
+    /// keys can name an HTTP field.
+    static func reservedHeaderInSessionDefaults(_ session: URLSession) -> String? {
+        guard let additionalHeaders = session.configuration.httpAdditionalHeaders else {
+            return nil
+        }
+        for key in additionalHeaders.keys {
+            guard let name = key as? String else { continue }
+            if name.lowercased() == reservedHeaderName { return name }
+        }
+        return nil
+    }
+
     /// Host enum (§5.2).
     static let hosts: [String] = [
         "apex",
