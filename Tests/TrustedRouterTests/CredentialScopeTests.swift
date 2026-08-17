@@ -14,6 +14,25 @@ import FoundationNetworking
 // `_request`, which never sees an absolute URL. Wire tests ride the real
 // request path through `MockURLProtocol` (TrustedRouterEndpointTests.swift).
 
+/// Attempt counter for the mock handler, which is invoked off the test's own
+/// task.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+}
+
 final class CredentialScopeTests: XCTestCase {
     var router: TrustedRouter!
     var session: URLSession!
@@ -101,7 +120,7 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: "https://status.trustedrouter.com./status.json"
+            path: "https://api.trustedrouter.com./v1/models"
         )
     }
 
@@ -131,30 +150,64 @@ final class CredentialScopeTests: XCTestCase {
         XCTAssertEqual(dict["status"] as? String, "ok")
     }
 
-    func testStatusFetchThrowsTypedErrorOnHTTPFailure() async {
+    /// The status fetch is single-shot, mirroring py's `self._client.get(url)`.
+    /// This is the assertion that distinguishes the bare fetcher from
+    /// `request<T>`, whose retry loop re-sends a 429: the host allowlist alone
+    /// already makes the status host credential-free, so without this the two
+    /// mechanisms mask each other.
+    func testStatusFetchIsSingleShot() async {
+        let counter = Counter()
         MockURLProtocol.requestHandler = { request in
+            counter.increment()
             let response = HTTPURLResponse(
-                url: request.url!, statusCode: 503, httpVersion: "HTTP/1.1", headerFields: nil
+                url: request.url!, statusCode: 429, httpVersion: "HTTP/1.1", headerFields: nil
             )!
             return (response, Data())
         }
         do {
             _ = try await router.status()
-            XCTFail("Expected a TrustedRouterError for a 503 status page")
+            XCTFail("Expected a TrustedRouterError for a 429 status page")
+        } catch {
+            // Classification is asserted separately below.
+        }
+        XCTAssertEqual(counter.value, 1)
+    }
+
+    /// Regression guard, not fix coverage: taking `status()` off the shared
+    /// `request<T>` path must not downgrade the public error taxonomy. It
+    /// routes failures through the same classifier, so a typed case, the
+    /// server's message, and `Retry-After` all still surface.
+    func testStatusFetchPreservesTheTypedErrorTaxonomy() async {
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 429,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["retry-after": "7"]
+            )!
+            let body = "{\"error\": {\"message\": \"slow down\"}}".data(using: .utf8)!
+            return (response, body)
+        }
+        do {
+            _ = try await router.status()
+            XCTFail("Expected a TrustedRouterError for a 429 status page")
         } catch let error as TrustedRouterError {
-            if case let .generic(statusCode, _, _) = error {
-                XCTAssertEqual(statusCode, 503)
+            if case let .rateLimit(statusCode, message, _, retryAfterSeconds) = error {
+                XCTAssertEqual(statusCode, 429)
+                XCTAssertEqual(message, "slow down")
+                XCTAssertEqual(retryAfterSeconds, 7)
             } else {
-                XCTFail("Expected .generic, got \(error)")
+                XCTFail("Expected .rateLimit, got \(error)")
             }
         } catch {
             XCTFail("Expected TrustedRouterError, got \(error)")
         }
     }
 
-    // MARK: - (c) Known TrustedRouter origins keep credentials on absolute URLs
+    // MARK: - (c) In-scope origins: the API/control planes, not the
+    // public-document hosts. This is the pinned implementation choice.
 
-    func testTrustedRouterHostAbsoluteURLKeepsCredentialHeaders() async throws {
+    func testTrustedRouterAPIHostAbsoluteURLKeepsCredentialHeaders() async throws {
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer test_key")
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"), "test_workspace")
@@ -162,8 +215,27 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: TrustedRouterConstants.defaultTrustReleaseURL
+            path: TrustedRouterConstants.defaultAPIBaseURL + "/models"
         )
+    }
+
+    func testPublicDocumentHostsAreNotCredentialledEvenViaRequest() async throws {
+        // The status and trust-release hosts serve unauthenticated JSON and
+        // nothing in the SDK authenticates to them, so they are deliberately
+        // out of scope: a hand-written absolute-URL request to either cannot
+        // carry the account's bearer. This is defence in depth behind the
+        // credential-free fetchers themselves.
+        for absoluteURL in [
+            TrustedRouterConstants.defaultStatusURL,
+            TrustedRouterConstants.defaultTrustReleaseURL
+        ] {
+            MockURLProtocol.requestHandler = { request in
+                XCTAssertNil(request.value(forHTTPHeaderField: "authorization"), absoluteURL)
+                XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"), absoluteURL)
+                return Self.ok(request)
+            }
+            let _: Data = try await router.request(method: "GET", path: absoluteURL)
+        }
     }
 
     func testHostMatchingIsCaseInsensitive() async throws {
@@ -175,7 +247,7 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: "HTTPS://STATUS.TRUSTEDROUTER.COM/status.json"
+            path: "HTTPS://API.TRUSTEDROUTER.COM/v1/models"
         )
     }
 
@@ -186,7 +258,7 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: "https://status.trustedrouter.com:443/status.json"
+            path: "https://api.trustedrouter.com:443/v1/models"
         )
     }
 
@@ -247,7 +319,60 @@ final class CredentialScopeTests: XCTestCase {
         }
         let _: Data = try await router.request(
             method: "GET",
-            path: "http://status.trustedrouter.com:443/status.json"
+            path: "http://api.trustedrouter.com:443/v1/models"
+        )
+    }
+
+    // MARK: - Client-wide default headers are scoped too
+
+    func testClientWideDefaultCredentialHeadersAreWithheldFromForeignOrigins() async throws {
+        // A client-wide `headers:` default is configured once for the
+        // client's own hosts; it is not authorization to credential whatever
+        // origin a caller-supplied absolute URL names. Non-credential
+        // defaults (tracing, proxy routing) still ride along.
+        let router = try TrustedRouter(options: TrustedRouterOptions(
+            apiKey: "test_key",
+            baseUrl: "https://inference.test/v1",
+            urlSession: session,
+            headers: [
+                "Authorization": "Bearer configured_default",
+                "X-TrustedRouter-Workspace": "configured_workspace",
+                "x-trace-id": "keep-me"
+            ]
+        ))
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertNil(request.value(forHTTPHeaderField: "authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-trace-id"), "keep-me")
+            return Self.ok(request)
+        }
+        let _: Data = try await router.request(method: "GET", path: "https://evil.example/x")
+    }
+
+    func testClientWideDefaultCredentialHeadersSurviveOnInScopeOrigins() async throws {
+        let router = try TrustedRouter(options: TrustedRouterOptions(
+            baseUrl: "https://inference.test/v1",
+            urlSession: session,
+            headers: ["Authorization": "Bearer configured_default"]
+        ))
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer configured_default")
+            return Self.ok(request)
+        }
+        let _: Data = try await router.request(method: "GET", path: "/models")
+    }
+
+    func testExplicitPerCallHeaderIsNeverWithheld() async throws {
+        // The documented escape hatch: a header the caller names at the call
+        // site is the caller's own choice, on any origin.
+        MockURLProtocol.requestHandler = { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer caller_supplied")
+            return Self.ok(request)
+        }
+        let _: Data = try await router.request(
+            method: "GET",
+            path: "https://private-gateway.example/v1/jobs",
+            options: PerCallOptions(extraHeaders: ["authorization": "Bearer caller_supplied"])
         )
     }
 
@@ -261,11 +386,12 @@ final class CredentialScopeTests: XCTestCase {
             return allowlist.allowsCredentials(for: url)
         }
 
-        // Known TrustedRouter origins, from the constants.
+        // The well-known API and control planes are in scope.
         XCTAssertTrue(allows(TrustedRouterConstants.defaultAPIBaseURL))
         XCTAssertTrue(allows(TrustedRouterConstants.defaultControlBaseURL))
-        XCTAssertTrue(allows(TrustedRouterConstants.defaultStatusURL))
-        XCTAssertTrue(allows(TrustedRouterConstants.defaultTrustReleaseURL))
+        // The public-document hosts are deliberately NOT.
+        XCTAssertFalse(allows(TrustedRouterConstants.defaultStatusURL))
+        XCTAssertFalse(allows(TrustedRouterConstants.defaultTrustReleaseURL))
         for alias in TrustedRouterConstants.aliasAPIBaseURLs {
             XCTAssertTrue(allows(alias), alias)
         }
@@ -284,9 +410,17 @@ final class CredentialScopeTests: XCTestCase {
         XCTAssertFalse(allows("https://api.trustedrouter.com:8443/v1"))
         XCTAssertFalse(allows("http://api.trustedrouter.com:443/v1"))
         XCTAssertFalse(allows("https://api.trustedrouter.com:80/v1"))
-        XCTAssertFalse(allows("https://api.trustedrouter.com@evil.example/"))
-        XCTAssertFalse(allows("https://status.trustedrouter.com./status.json"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com./v1"))
         XCTAssertFalse(allows("https://api.trustedrouter.com.evil.example/v1"))
+        XCTAssertFalse(allows("https://evil.example/api.trustedrouter.com/v1"))
         XCTAssertFalse(allows("file:///etc/passwd"))
+        XCTAssertFalse(allows("ftp://api.trustedrouter.com/v1"))
+
+        // Userinfo is refused outright, so no Foundation-version disagreement
+        // about which component is the authority can grant credentials.
+        XCTAssertFalse(allows("https://api.trustedrouter.com@evil.example/"))
+        XCTAssertFalse(allows("https://api.trustedrouter.com:x@evil.example/"))
+        XCTAssertFalse(allows("https://user@api.trustedrouter.com/v1"))
+        XCTAssertFalse(allows("https://user:pass@api.trustedrouter.com/v1"))
     }
 }

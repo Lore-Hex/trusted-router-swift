@@ -60,14 +60,19 @@ extension TrustedRouter {
             throw TrustedRouterError.internalError("Invalid status URL: \(url)")
         }
         var req = URLRequest(url: statusURL)
-        req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
+        // Client-wide default headers (tracing, proxy routing) still apply;
+        // only the credential headers are withheld, on every host.
+        for (name, value) in buildHeaders(includeCredentials: false) {
+            req.setValue(value, forHTTPHeaderField: name)
+        }
 
         let (data, response) = try await urlSession.data(for: req)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw TrustedRouterError.internalError("Non-HTTP response")
-        }
+        let httpResponse = try Self.httpOnly(response)
         if httpResponse.statusCode >= 400 {
-            throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Status fetch failed", payload: nil)
+            // Reuse the shared classifier so the public error taxonomy
+            // (.authentication / .rateLimit with Retry-After / …) and the
+            // server's message and payload survive this path.
+            throw classifyError(statusCode: httpResponse.statusCode, data: data, response: httpResponse)
         }
         // Return raw dict for status as it's highly dynamic
         if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
