@@ -133,7 +133,41 @@ final class HeaderMergeTests: XCTestCase {
             headers: ["AUTHORIZATION": "Bearer caller"],
             apiKey: "per_call_key"
         )
+        // The variant assertion matters: under the old code this dictionary
+        // held BOTH the caller's AUTHORIZATION and the computed lowercase
+        // authorization, so a value-only lookup could pass by luck.
+        XCTAssertEqual(variants(of: "authorization", in: merged), ["AUTHORIZATION"])
         XCTAssertEqual(value(of: "authorization", in: merged), "Bearer caller")
+
+        let request = try request(
+            from: router,
+            headers: ["AUTHORIZATION": "Bearer caller"],
+            options: PerCallOptions(apiKey: "per_call_key")
+        )
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer caller")
+    }
+
+    func testNonEmptyPerCallAPIKeyReplacesTheClientKey() throws {
+        let router = try makeRouter()
+        let merged = router.buildHeaders(apiKey: "per_call_key")
+        XCTAssertEqual(value(of: "authorization", in: merged), "Bearer per_call_key")
+    }
+
+    func testEmptyPerCallAPIKeySuppressesTheClientKey() throws {
+        // The OAuth token exchange relies on an empty per-call key producing
+        // NO authorization header rather than falling back to the client key.
+        let router = try makeRouter()
+        let merged = router.buildHeaders(apiKey: "")
+        XCTAssertEqual(variants(of: "authorization", in: merged), [])
+    }
+
+    func testEmptyCallerAuthorizationStillCountsAsSupplied() throws {
+        // "Supplied" means supplied: an explicitly empty caller value is the
+        // caller's decision and must not be silently replaced by the apiKey.
+        let router = try makeRouter()
+        let merged = router.buildHeaders(headers: ["Authorization": ""])
+        XCTAssertEqual(variants(of: "authorization", in: merged), ["Authorization"])
+        XCTAssertEqual(value(of: "authorization", in: merged), "")
     }
 
     // MARK: - Computed headers are the last layer
@@ -179,6 +213,21 @@ final class HeaderMergeTests: XCTestCase {
                 options: PerCallOptions(extraHeaders: ["x-case-test": "extra-layer"])
             )
             XCTAssertEqual(request.value(forHTTPHeaderField: "X-Case-Test"), "extra-layer")
+        }
+    }
+
+    func testSameDictionaryCaseVariantsResolveDeterministically() throws {
+        // Two case-variants inside ONE layer are the caller's ambiguity, but
+        // the resolution must not depend on the per-process dictionary seed:
+        // layers apply in sorted key order, so the lexicographically last
+        // key's value wins ("x-dup" sorts after "X-Dup" in ASCII).
+        for _ in 0..<50 {
+            let router = try makeRouter()
+            let merged = router.buildHeaders(
+                headers: ["X-Dup": "capitalized", "x-dup": "lowercased"]
+            )
+            XCTAssertEqual(variants(of: "x-dup", in: merged), ["x-dup"])
+            XCTAssertEqual(value(of: "x-dup", in: merged), "lowercased")
         }
     }
 

@@ -91,10 +91,12 @@ public final class TrustedRouter: Sendable {
     /// by side, and because `URLRequest`'s own header store IS
     /// case-insensitive, whichever entry dictionary iteration happens to
     /// apply last silently wins. Removing every case-variant before writing
-    /// makes the last LAYER to set a name the deterministic winner (the
-    /// value keeps the caller's preferred casing on the wire). Within one
-    /// dictionary two case-variants of the same name are still the caller's
-    /// ambiguity — exactly one survives, but which value is unspecified.
+    /// makes the last LAYER to set a name the deterministic winner. The
+    /// merged dictionary keeps the winning layer's spelling (the URL loading
+    /// system may still canonicalize casing on the wire). Layers are applied
+    /// in sorted key order, so even two case-variants inside ONE dictionary
+    /// resolve deterministically: the lexicographically last key's value
+    /// wins.
     private static func setHeader(
         _ headers: inout [String: String], name: String, value: String
     ) {
@@ -140,8 +142,13 @@ public final class TrustedRouter: Sendable {
         workspaceId: String? = nil,
         includeCredentials: Bool = true
     ) -> [String: String] {
+        // Each layer applies in sorted key order: dictionary iteration order
+        // is seeded per process, and letting it pick the survivor among
+        // same-layer case-variants would reintroduce (rarer) nondeterminism.
         var out = ["user-agent": TrustedRouter.userAgent]
-        for (k, v) in self.defaultHeaders { Self.setHeader(&out, name: k, value: v) }
+        for (k, v) in self.defaultHeaders.sorted(by: { $0.key < $1.key }) {
+            Self.setHeader(&out, name: k, value: v)
+        }
         // Credential scoping, part 1 (see Transport/CredentialScope.swift):
         // client-wide default headers are configured once, for the client's
         // own hosts — they are not authorization to credential whatever
@@ -160,10 +167,14 @@ public final class TrustedRouter: Sendable {
         // origin. Callers who must authenticate to a host the client is not
         // configured for use these (or construct a client with that base).
         if let headers = headers {
-            for (k, v) in headers { Self.setHeader(&out, name: k, value: v) }
+            for (k, v) in headers.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         if let extraHeaders = extraHeaders {
-            for (k, v) in extraHeaders { Self.setHeader(&out, name: k, value: v) }
+            for (k, v) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: k, value: v)
+            }
         }
         // Credential scoping, part 2: the three headers the SDK attaches from
         // its own stored configuration — `idempotency-key`,

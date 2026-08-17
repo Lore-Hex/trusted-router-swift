@@ -12,9 +12,10 @@ All notable changes to this SDK are documented here. Format roughly follows
   SDK's lowercase keys deterministically wins by layer precedence
   (built-ins < client defaults < per-call headers < extra headers <
   computed) instead of depending on dictionary iteration order against
-  `URLRequest`'s case-insensitive header store. A caller-supplied
-  authorization header in any casing still suppresses the API-key-derived
-  one.
+  `URLRequest`'s case-insensitive header store. Layers apply in sorted key
+  order, so even two case-variants inside one dictionary resolve
+  deterministically. A caller-supplied authorization header in any casing
+  still suppresses the API-key-derived one.
 
 ## 0.6.1 — 2026-08-08
 
