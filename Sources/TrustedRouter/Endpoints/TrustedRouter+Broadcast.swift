@@ -40,7 +40,10 @@ extension TrustedRouter {
 
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "POST", path: "/broadcast/destinations", body: body, options: options, plane: .control)
+        return try await request(
+            method: "POST", path: "/broadcast/destinations", body: body,
+            options: automaticIdempotencyOptions(options), plane: .control
+        )
     }
 
     public func getBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> BroadcastDestination {
@@ -52,18 +55,27 @@ extension TrustedRouter {
     public func updateBroadcastDestination(id: String, patch: [String: Any], workspaceId: String? = nil) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "PATCH", path: "/broadcast/destinations/\(id)", body: patch, options: options, plane: .control)
+        return try await request(
+            method: "PATCH", path: "/broadcast/destinations/\(id)", body: patch,
+            options: automaticIdempotencyOptions(options), plane: .control
+        )
     }
 
     public func deleteBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "DELETE", path: "/broadcast/destinations/\(id)", options: options, plane: .control)
+        return try await request(
+            method: "DELETE", path: "/broadcast/destinations/\(id)",
+            options: automaticIdempotencyOptions(options), plane: .control
+        )
     }
 
     public func testBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "POST", path: "/broadcast/destinations/\(id)/test", options: options, plane: .control)
+        return try await request(
+            method: "POST", path: "/broadcast/destinations/\(id)/test",
+            options: automaticIdempotencyOptions(options), plane: .control
+        )
     }
 }

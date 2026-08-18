@@ -22,6 +22,7 @@ public final class TrustedRouter: Sendable {
     public let baseUrl: String
     public let controlBaseURL: String
     public let urlSession: URLSession
+    let credentialFreeURLSession: URLSession
     public let defaultHeaders: [String: String]
     public let maxRetries: Int
     public let regionalFailover: Bool
@@ -73,6 +74,7 @@ public final class TrustedRouter: Sendable {
         self.baseUrl = trimTrailingSlashes(options.baseUrl ?? TrustedRouterConstants.defaultAPIBaseURL)
         self.controlBaseURL = trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
         self.urlSession = options.urlSession
+        self.credentialFreeURLSession = options.urlSession.trustedRouterCredentialFreeCopy()
         self.defaultHeaders = options.headers
         self.maxRetries = max(0, options.maxRetries)
         self.regionalFailover = options.regionalFailover
@@ -316,7 +318,7 @@ public final class TrustedRouter: Sendable {
             options: options,
             body: body
         )
-        let (data, response) = try await urlSession.data(for: request)
+        let (data, response) = try await urlSession.trustedRouterData(for: request)
         return (data, try Self.httpOnly(response))
     }
 
@@ -344,10 +346,10 @@ public final class TrustedRouter: Sendable {
             streaming: true
         ) { request in
             #if os(Linux)
-            let (data, response) = try await self.urlSession.data(for: request)
+            let (data, response) = try await self.urlSession.trustedRouterData(for: request)
             return (Self.byteStream(from: data), try Self.httpOnly(response))
             #else
-            let (bytes, response) = try await self.urlSession.bytes(for: request)
+            let (bytes, response) = try await self.urlSession.trustedRouterBytes(for: request)
             return (Self.byteStream(from: bytes), try Self.httpOnly(response))
             #endif
         }
@@ -382,11 +384,11 @@ public final class TrustedRouter: Sendable {
             options: options,
             streaming: false
         ) { request in
-            let (data, response) = try await self.urlSession.data(for: request)
+            let (data, response) = try await self.urlSession.trustedRouterData(for: request)
             return (data, try Self.httpOnly(response))
         }
 
-        if response.statusCode >= 400 {
+        if !(200..<300).contains(response.statusCode) {
             throw classifyError(statusCode: response.statusCode, data: data, response: response)
         }
 

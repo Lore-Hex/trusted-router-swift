@@ -51,7 +51,7 @@ final class StreamingErrorTests: XCTestCase {
 
         StreamSequenceProtocol.scripted = [
             (503, #"{"error":{"message":"temporarily unavailable"}}"#),
-            (200, #"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"# + "\n\n"),
+            (200, #"data: {"id":"chat-1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}"# + "\n\ndata: [DONE]\n\n"),
         ]
 
         let stream = try await router.chatCompletionsChunks(

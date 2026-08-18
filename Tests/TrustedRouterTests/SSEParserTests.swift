@@ -82,39 +82,37 @@ final class SSEParserTests: XCTestCase {
         XCTAssertEqual(out, [Echo(token: "hi")])
     }
 
-    func testTypedIteratorSkipsUndecodableFrames() async throws {
-        // Heartbeats / pings often come through as `data: ` with non-JSON
-        // payloads. The typed iterator should skip them silently and keep
-        // pulling the next frame.
+    func testTypedIteratorRejectsUndecodableFrames() async throws {
         struct Echo: Decodable, Equatable { let token: String }
         let chunks = [
             "data: ping\n\n",
             #"data: {"token":"hi"}"# + "\n\n",
         ]
         let bytes = try await mockAsyncBytes(chunks: chunks)
-        var out: [Echo] = []
-        for try await event in iterSseEvents(bytes: bytes, type: Echo.self) {
-            out.append(event)
+        do {
+            for try await _ in iterSseEvents(bytes: bytes, type: Echo.self) {}
+            XCTFail("expected malformed stream to fail closed")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.isEmpty)
         }
-        XCTAssertEqual(out, [Echo(token: "hi")])
     }
 
-    func testDictIteratorFallsBackToRawDataWhenNotJSON() async throws {
+    func testDictIteratorRejectsNonJSONData() async throws {
         let chunks = ["data: not json\n\n"]
         let bytes = try await mockAsyncBytes(chunks: chunks)
-        var out: [[String: Any]] = []
-        for try await event in iterSseEvents(bytes: bytes) {
-            out.append(event)
+        do {
+            for try await _ in iterSseEvents(bytes: bytes) {}
+            XCTFail("expected malformed stream to fail closed")
+        } catch TrustedRouterError.invalidResponse(let message) {
+            XCTAssertTrue(message.contains("JSON object"))
         }
-        XCTAssertEqual(out.count, 1)
-        XCTAssertEqual(out.first?["data"] as? String, "not json")
     }
 
     func testDictIteratorIncludesEventNameWhenPresent() async throws {
         let chunks = [#"event: hello\ndata: {"k":1}\n\n"#]
         // The above used escaped \n inside a raw string by mistake; rewrite:
         let real = "event: hello\ndata: {\"k\":1}\n\n"
-        let bytes = try await mockAsyncBytes(chunks: [real])
+        let bytes = try await mockAsyncBytes(chunks: [real, "data: [DONE]\n\n"])
         _ = chunks
         var out: [[String: Any]] = []
         for try await event in iterSseEvents(bytes: bytes) {
@@ -125,14 +123,35 @@ final class SSEParserTests: XCTestCase {
         XCTAssertEqual(out.first?["k"] as? Int, 1)
     }
 
-    func testTrailingFrameWithoutTerminatorIsFlushed() async throws {
-        // Some servers close the connection right after the last frame
-        // without sending the terminating \n\n. SSEParser flushes the
-        // remaining buffer at EOF.
+    func testTrailingFrameWithoutTerminatorFailsClosed() async throws {
         let chunks = ["data: tail\n"]  // missing the final \n
-        let events = try await collectSSEEvents(chunks: chunks)
-        XCTAssertEqual(events.count, 1)
-        XCTAssertEqual(events.first?.data, "tail")
+        do {
+            _ = try await collectSSEEvents(chunks: chunks)
+            XCTFail("expected incomplete frame failure")
+        } catch TrustedRouterError.invalidResponse(let message) {
+            XCTAssertTrue(message.contains("inside a frame"))
+        }
+    }
+
+    func testTypedIteratorRejectsEOFBeforeDone() async throws {
+        struct Echo: Decodable { let token: String }
+        let bytes = try await mockAsyncBytes(chunks: [#"data: {"token":"hi"}"# + "\n\n"])
+        do {
+            for try await _ in iterSseEvents(bytes: bytes, type: Echo.self) {}
+            XCTFail("expected missing [DONE] failure")
+        } catch TrustedRouterError.invalidResponse(let message) {
+            XCTAssertTrue(message.contains("before [DONE]"))
+        }
+    }
+
+    func testOversizedFrameIsRejected() async throws {
+        let huge = "data: " + String(repeating: "x", count: SSEParser.maximumFrameBytes) + "\n\n"
+        do {
+            _ = try await collectSSEEvents(chunks: [huge])
+            XCTFail("expected frame bound failure")
+        } catch TrustedRouterError.invalidResponse(let message) {
+            XCTAssertTrue(message.contains("exceeded"))
+        }
     }
 
     // MARK: - Harness

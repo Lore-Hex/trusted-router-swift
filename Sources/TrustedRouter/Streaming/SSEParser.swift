@@ -13,45 +13,60 @@ public typealias TrustedRouterByteStream = AsyncThrowingStream<UInt8, Error>
 
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
 public enum SSEParser {
+    /// Upper bound for one not-yet-delimited event. Prevents an untrusted
+    /// stream from growing the parser buffer without limit.
+    public static let maximumFrameBytes = 1_048_576
     
     /// Low-level stream of raw SSE events from bytes.
     public static func stream(from bytes: TrustedRouterByteStream) -> AsyncThrowingStream<SSEEvent, Error> {
         return AsyncThrowingStream { continuation in
-            Task {
+            let producer = Task {
                 do {
                     var buffer = Data()
                     for try await byte in bytes {
+                        try Task.checkCancellation()
                         buffer.append(byte)
+                        guard buffer.count <= maximumFrameBytes else {
+                            throw TrustedRouterError.invalidResponse(
+                                "TrustedRouter SSE frame exceeded \(maximumFrameBytes) bytes"
+                            )
+                        }
                         
                         // Check for frame boundary: \n\n (10, 10) or \r\n\r\n (13, 10, 13, 10)
                         if buffer.count >= 2 && buffer.suffix(2) == Data([10, 10]) {
-                            if let frame = String(data: buffer, encoding: .utf8) {
-                                if let event = parseFrame(frame) {
-                                    continuation.yield(event)
-                                }
+                            guard let frame = String(data: buffer, encoding: .utf8) else {
+                                throw TrustedRouterError.invalidResponse(
+                                    "TrustedRouter SSE frame was not valid UTF-8"
+                                )
+                            }
+                            if let event = parseFrame(frame) {
+                                continuation.yield(event)
                             }
                             buffer.removeAll(keepingCapacity: true)
                         } else if buffer.count >= 4 && buffer.suffix(4) == Data([13, 10, 13, 10]) {
-                            if let frame = String(data: buffer, encoding: .utf8) {
-                                if let event = parseFrame(frame) {
-                                    continuation.yield(event)
-                                }
+                            guard let frame = String(data: buffer, encoding: .utf8) else {
+                                throw TrustedRouterError.invalidResponse(
+                                    "TrustedRouter SSE frame was not valid UTF-8"
+                                )
+                            }
+                            if let event = parseFrame(frame) {
+                                continuation.yield(event)
                             }
                             buffer.removeAll(keepingCapacity: true)
                         }
                     }
                     
                     if !buffer.isEmpty {
-                        if let frame = String(data: buffer, encoding: .utf8),
-                           let event = parseFrame(frame) {
-                            continuation.yield(event)
-                        }
+                        throw TrustedRouterError.invalidResponse(
+                            "TrustedRouter SSE stream ended inside a frame"
+                        )
                     }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { @Sendable _ in producer.cancel() }
         }
     }
     
@@ -79,24 +94,41 @@ public func iterSseEvents<T: Decodable>(bytes: TrustedRouterByteStream, type: T.
     let rawStream = SSEParser.stream(from: bytes)
     
     return AsyncThrowingStream { continuation in
-        Task {
+        let producer = Task {
             do {
+                var sawDone = false
                 for try await event in rawStream {
+                    try Task.checkCancellation()
                     let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmedData == "[DONE]" { break }
-                    guard let data = trimmedData.data(using: .utf8) else { continue }
-                    do {
-                        let model = try decoder.decode(T.self, from: data)
-                        continuation.yield(model)
-                    } catch {
-                        // Skip non-matching chunks
+                    if trimmedData == "[DONE]" {
+                        sawDone = true
+                        break
                     }
+                    guard let data = trimmedData.data(using: .utf8) else {
+                        throw TrustedRouterError.invalidResponse(
+                            "TrustedRouter SSE data was not valid UTF-8"
+                        )
+                    }
+                    if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       object["error"] != nil {
+                        let message = ((object["error"] as? [String: Any])?["message"] as? String)
+                            ?? "TrustedRouter stream returned an error"
+                        throw TrustedRouterError.invalidResponse(message)
+                    }
+                    let model = try decoder.decode(T.self, from: data)
+                    continuation.yield(model)
+                }
+                guard sawDone else {
+                    throw TrustedRouterError.invalidResponse(
+                        "TrustedRouter SSE stream ended before [DONE]"
+                    )
                 }
                 continuation.finish()
             } catch {
                 continuation.finish(throwing: error)
             }
         }
+        continuation.onTermination = { @Sendable _ in producer.cancel() }
     }
 }
 
@@ -105,28 +137,47 @@ public func iterSseEvents(bytes: TrustedRouterByteStream) -> AsyncThrowingStream
     let rawStream = SSEParser.stream(from: bytes)
     
     return AsyncThrowingStream { continuation in
-        Task {
+        let producer = Task {
             do {
+                var sawDone = false
                 for try await event in rawStream {
+                    try Task.checkCancellation()
                     let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmedData == "[DONE]" { break }
-                    guard let data = trimmedData.data(using: .utf8) else { continue }
-                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                        var payload = json
-                        if let eventName = event.event, payload["event"] == nil {
-                            payload["event"] = eventName
-                        }
-                        continuation.yield(payload)
-                    } else {
-                        var payload: [String: Any] = ["data": event.data]
-                        if let eventName = event.event { payload["event"] = eventName }
-                        continuation.yield(payload)
+                    if trimmedData == "[DONE]" {
+                        sawDone = true
+                        break
                     }
+                    guard let data = trimmedData.data(using: .utf8) else {
+                        throw TrustedRouterError.invalidResponse(
+                            "TrustedRouter SSE data was not valid UTF-8"
+                        )
+                    }
+                    guard var payload = try JSONSerialization.jsonObject(with: data)
+                            as? [String: Any] else {
+                        throw TrustedRouterError.invalidResponse(
+                            "TrustedRouter SSE data was not a JSON object"
+                        )
+                    }
+                    if let error = payload["error"] {
+                        let message = ((error as? [String: Any])?["message"] as? String)
+                            ?? "TrustedRouter stream returned an error"
+                        throw TrustedRouterError.invalidResponse(message)
+                    }
+                    if let eventName = event.event, payload["event"] == nil {
+                        payload["event"] = eventName
+                    }
+                    continuation.yield(payload)
+                }
+                guard sawDone else {
+                    throw TrustedRouterError.invalidResponse(
+                        "TrustedRouter SSE stream ended before [DONE]"
+                    )
                 }
                 continuation.finish()
             } catch {
                 continuation.finish(throwing: error)
             }
         }
+        continuation.onTermination = { @Sendable _ in producer.cancel() }
     }
 }

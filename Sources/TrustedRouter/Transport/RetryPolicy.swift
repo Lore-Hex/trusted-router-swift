@@ -155,14 +155,14 @@ enum RetryPolicy {
         response: HTTPURLResponse?
     ) -> Bool {
         if let response, let verdict = shouldRetryVerdict(response) { return verdict }
-        if statusCode == 429 { return true }
-        return usesInferenceBase(path: path, plane: plane) && isFailoverableStatus(statusCode, response)
+        return statusCode == 429 || statusCode >= 500
     }
 
-    /// A transport failure means no server saw the request, so re-sending is
-    /// always safe; the flag only decides whether the retry may change host.
+    /// Transport failures are retry candidates, but the engine separately
+    /// requires a safe method or idempotency key before replaying: an I/O
+    /// error can happen after a server has already received the request.
     static func shouldRetryTransportError(path: String, plane: TrustedRouterRequestPlane) -> Bool {
-        return usesInferenceBase(path: path, plane: plane)
+        return true
     }
 
     /// Jittered exponential backoff (500ms base, 30s cap), floored by any
