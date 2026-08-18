@@ -143,7 +143,8 @@ extension TrustedRouter {
         var req = URLRequest(url: url)
         req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
         
-        let (data, response) = try await credentialFreeURLSession.trustedRouterData(for: req)
+        let (data, response) = try await credentialFreeURLSession
+            .trustedRouterCredentialFreeData(for: req)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw TrustedRouterError.internalError("Non-HTTP response")
         }
@@ -169,7 +170,7 @@ public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultT
     req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
     
     let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
-        .trustedRouterData(for: req)
+        .trustedRouterCredentialFreeData(for: req)
     guard let httpResponse = response as? HTTPURLResponse else {
         throw TrustedRouterError.internalError("Non-HTTP response")
     }
@@ -287,7 +288,7 @@ public func verifyGatewayAttestation(
         }
         let request = URLRequest(url: url)
         let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
-            .trustedRouterData(for: request)
+            .trustedRouterCredentialFreeData(for: request)
         if let resp = response as? HTTPURLResponse,
            !(200..<300).contains(resp.statusCode) {
             throw AttestationVerificationError("JWKS fetch returned HTTP \(resp.statusCode)")

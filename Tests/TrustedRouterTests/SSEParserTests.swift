@@ -154,6 +154,131 @@ final class SSEParserTests: XCTestCase {
         }
     }
 
+    func testRawParserPullsOnlyThroughTheDemandedFrame() async throws {
+        let firstFrame = "data: first\n\n"
+        let secondFrame = "data: second\n\n"
+        let counter = PullCountingBytes(Data((firstFrame + secondFrame).utf8))
+        let stream = SSEParser.stream(from: counter.stream())
+
+        let initialPulls = await counter.pullCount
+        XCTAssertEqual(initialPulls, 0)
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertEqual(first?.data, "first")
+        let pullsAfterFirst = await counter.pullCount
+        XCTAssertEqual(pullsAfterFirst, Data(firstFrame.utf8).count)
+        for _ in 0..<10 { await Task.yield() }
+        let pullsWhileIdle = await counter.pullCount
+        XCTAssertEqual(pullsWhileIdle, Data(firstFrame.utf8).count)
+
+        let second = try await iterator.next()
+        XCTAssertEqual(second?.data, "second")
+        let finalPulls = await counter.pullCount
+        XCTAssertEqual(finalPulls, Data((firstFrame + secondFrame).utf8).count)
+    }
+
+    func testTypedAdapterAddsNoEagerQueue() async throws {
+        struct Echo: Decodable { let token: String }
+        let firstFrame = "data: {\"token\":\"one\"}\n\n"
+        let rest = "data: {\"token\":\"two\"}\n\ndata: [DONE]\n\n"
+        let counter = PullCountingBytes(Data((firstFrame + rest).utf8))
+        let stream = iterSseEvents(bytes: counter.stream(), type: Echo.self)
+
+        let initialPulls = await counter.pullCount
+        XCTAssertEqual(initialPulls, 0)
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertEqual(first?.token, "one")
+        let afterFirst = await counter.pullCount
+        XCTAssertEqual(afterFirst, Data(firstFrame.utf8).count)
+        for _ in 0..<10 { await Task.yield() }
+        let afterIdle = await counter.pullCount
+        XCTAssertEqual(afterIdle, afterFirst)
+    }
+
+    func testDictionaryAdapterAddsNoEagerQueue() async throws {
+        let firstFrame = "event: one\ndata: {\"value\":1}\n\n"
+        let rest = "event: two\ndata: {\"value\":2}\n\ndata: [DONE]\n\n"
+        let counter = PullCountingBytes(Data((firstFrame + rest).utf8))
+        let stream = iterSseEvents(bytes: counter.stream())
+
+        let initialPulls = await counter.pullCount
+        XCTAssertEqual(initialPulls, 0)
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertEqual(first?["event"] as? String, "one")
+        XCTAssertEqual(first?["value"] as? Int, 1)
+        let afterFirst = await counter.pullCount
+        XCTAssertEqual(afterFirst, Data(firstFrame.utf8).count)
+        for _ in 0..<10 { await Task.yield() }
+        let afterIdle = await counter.pullCount
+        XCTAssertEqual(afterIdle, afterFirst)
+    }
+
+    func testChatTextAdapterAddsNoEagerQueue() async throws {
+        let chunks = [
+            ChatCompletionChunk(
+                id: "c1", object: nil, created: nil, model: "m",
+                choices: [.init(
+                    index: 0,
+                    delta: .init(role: "assistant", content: nil),
+                    finishReason: nil
+                )]
+            ),
+            ChatCompletionChunk(
+                id: "c1", object: nil, created: nil, model: "m",
+                choices: [.init(
+                    index: 0,
+                    delta: .init(role: nil, content: "one"),
+                    finishReason: nil
+                )]
+            ),
+            ChatCompletionChunk(
+                id: "c1", object: nil, created: nil, model: "m",
+                choices: [.init(
+                    index: 0,
+                    delta: .init(role: nil, content: "two"),
+                    finishReason: "stop"
+                )]
+            )
+        ]
+        let counter = PullCountingChatChunks(chunks)
+        let stream = chatTextStream(from: counter.stream())
+
+        let initialPulls = await counter.pullCount
+        XCTAssertEqual(initialPulls, 0)
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        XCTAssertEqual(first, "one")
+        let afterFirst = await counter.pullCount
+        XCTAssertEqual(afterFirst, 2)
+        for _ in 0..<10 { await Task.yield() }
+        let afterIdle = await counter.pullCount
+        XCTAssertEqual(afterIdle, afterFirst)
+        let second = try await iterator.next()
+        XCTAssertEqual(second, "two")
+        let finalPulls = await counter.pullCount
+        XCTAssertEqual(finalPulls, 3)
+    }
+
+    func testBufferedBodyReplayIsPullBasedAndDocumentsPlatformCapability() async throws {
+        let stream = TrustedRouter.byteStream(from: Data([1, 2, 3]))
+        var iterator = stream.makeAsyncIterator()
+        let first = try await iterator.next()
+        let second = try await iterator.next()
+        let third = try await iterator.next()
+        let end = try await iterator.next()
+        XCTAssertEqual(first, 1)
+        XCTAssertEqual(second, 2)
+        XCTAssertEqual(third, 3)
+        XCTAssertNil(end)
+        #if os(Linux)
+        XCTAssertFalse(TrustedRouter.hasLiveResponseByteStreaming)
+        #else
+        XCTAssertTrue(TrustedRouter.hasLiveResponseByteStreaming)
+        #endif
+    }
+
     // MARK: - Harness
 
     /// Push pre-baked SSE chunks through a mocked URLSession, return the
@@ -196,6 +321,54 @@ final class SSEParserTests: XCTestCase {
             }
             continuation.finish()
         }
+    }
+}
+
+private actor PullCountingBytes {
+    private let bytes: Data
+    private var index = 0
+    private var pulls = 0
+
+    init(_ bytes: Data) { self.bytes = bytes }
+
+    var pullCount: Int { pulls }
+
+    nonisolated func stream() -> TrustedRouterByteStream {
+        TrustedRouterByteStream(unfolding: { [self] in
+            await next()
+        })
+    }
+
+    private func next() -> UInt8? {
+        guard index < bytes.count else { return nil }
+        let byte = bytes[index]
+        index += 1
+        pulls += 1
+        return byte
+    }
+}
+
+private actor PullCountingChatChunks {
+    private let chunks: [ChatCompletionChunk]
+    private var index = 0
+    private var pulls = 0
+
+    init(_ chunks: [ChatCompletionChunk]) { self.chunks = chunks }
+
+    var pullCount: Int { pulls }
+
+    nonisolated func stream() -> AsyncThrowingStream<ChatCompletionChunk, Error> {
+        AsyncThrowingStream(unfolding: { [self] in
+            await next()
+        })
+    }
+
+    private func next() -> ChatCompletionChunk? {
+        guard index < chunks.count else { return nil }
+        let chunk = chunks[index]
+        index += 1
+        pulls += 1
+        return chunk
     }
 }
 

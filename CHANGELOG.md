@@ -27,6 +27,24 @@ All notable changes to this SDK are documented here. Format roughly follows
   `TRUSTEDROUTER_TELEMETRY=0`, or `DO_NOT_TRACK=1`.
 
 ### Fixed
+- SSE parsing and typed/dictionary/text adapters are now pull-driven instead
+  of feeding unbounded `AsyncThrowingStream` continuation queues. Frames are
+  capped at 1 MiB. Darwin uses live `URLSession.AsyncBytes`; Linux's
+  `FoundationNetworking` limitation is explicit: it buffers the response
+  before the SDK performs demand-driven replay.
+- URLSession redirects and HTTP authentication follow-ups are blocked. SDK
+  sends use a configuration clone without the caller's ambient session
+  delegate or credential store, and the per-task delegate cancels non-TLS
+  challenges. TLS server-trust evaluation still uses Foundation's default
+  handler; a blocked 401/407 is restored to the normal SDK status classifier
+  without becoming a retryable cancellation error. The clone retains protocol
+  classes, proxies, cache/timeouts, benign headers, and cookies, but deliberately
+  does not retain delegate-based private-CA, pinning, mTLS, or auth behavior.
+- Public status, attestation, trust-release, JWKS, and regional-health requests
+  now receive a final credential-header scrub in addition to their isolated
+  cookie and credential stores. Authorization, proxy authorization, cookies,
+  API keys, workspace/idempotency fields, and `x-tr-client` are withheld while
+  benign tracing defaults remain.
 - The User-Agent now matches the contract §3.1 grammar
   (`trusted-router-swift/SEMVER runtime/ver`): the old parenthesised
   `(macOS 14.6)` suffix fell outside the grammar the enclave parses, so the

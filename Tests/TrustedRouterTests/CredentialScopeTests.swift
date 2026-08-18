@@ -6,14 +6,13 @@ import XCTest
 import FoundationNetworking
 #endif
 
-// Credential scoping on absolute-URL fetches: the SDK-attached credential
-// headers (`authorization`, `x-trustedrouter-workspace`, `idempotency-key`)
-// are sent only to the configured and well-known TrustedRouter API/control
-// origins, and the status fetch carries none of them anywhere — mirroring
+// Credential scoping on absolute-URL fetches: credential-shaped client
+// defaults are sent only to configured API/control origins, and public
+// metadata fetches carry none of them anywhere — mirroring
 // trusted-router-py, where `status()` is a bare single-shot get on the raw
 // HTTP client and those headers exist only inside `_request`, which never
 // sees an absolute URL. Client-wide non-credential defaults still ride along
-// everywhere; scoping covers the three names the SDK attaches itself.
+// everywhere; metadata gets a final scrub immediately before URLSession.
 //
 // Wire tests ride the real request path through `MockURLProtocol`
 // (TrustedRouterEndpointTests.swift). Where two mechanisms would mask each
@@ -166,18 +165,61 @@ final class CredentialScopeTests: XCTestCase {
         let router = try TrustedRouter(options: TrustedRouterOptions(
             apiKey: "test_key",
             urlSession: session,
-            headers: ["x-trace-id": "keep-me"],
+            headers: [
+                "Authorization": "Bearer ambient",
+                "Proxy-Authorization": "Basic ambient-proxy",
+                "Cookie": "session=ambient",
+                "Cookie2": "legacy=ambient",
+                "X-Api-Key": "ambient-api-key",
+                "X-TR-CLIENT": "v=1;a=99;s=0",
+                "X-TrustedRouter-Workspace": "ambient-workspace",
+                "Idempotency-Key": "ambient-idempotency",
+                "x-trace-id": "keep-me"
+            ],
             workspaceId: "test_workspace"
         ))
         MockURLProtocol.requestHandler = { request in
             XCTAssertNil(request.value(forHTTPHeaderField: "authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "proxy-authorization"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "cookie"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "cookie2"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "x-api-key"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "x-tr-client"))
             XCTAssertNil(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"))
+            XCTAssertNil(request.value(forHTTPHeaderField: "idempotency-key"))
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-trace-id"), "keep-me")
             XCTAssertEqual(request.value(forHTTPHeaderField: "user-agent"), TrustedRouter.userAgent)
             return Self.ok(request, body: "{\"status\": \"ok\"}")
         }
         let dict = try await router.status()
         XCTAssertEqual(dict["status"] as? String, "ok")
+    }
+
+    func testFinalCredentialFreeMetadataSendScrubsEverySensitiveShape() async throws {
+        var request = URLRequest(url: URL(string: "https://metadata.example/document.json")!)
+        for (name, value) in [
+            "Authorization": "Bearer request",
+            "Proxy-Authorization": "Basic request-proxy",
+            "Cookie": "session=request",
+            "Cookie2": "legacy=request",
+            "X-Api-Key": "request-api-key",
+            "X-TR-CLIENT": "v=1;a=99;s=0",
+            "X-TrustedRouter-Workspace": "request-workspace",
+            "Idempotency-Key": "request-idempotency",
+            "X-Trace-Id": "keep-request"
+        ] {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        MockURLProtocol.requestHandler = { request in
+            for name in TrustedRouter.credentialHeaderNames {
+                XCTAssertNil(request.value(forHTTPHeaderField: name), name)
+            }
+            XCTAssertEqual(request.value(forHTTPHeaderField: "x-trace-id"), "keep-request")
+            return Self.ok(request, body: "{\"ok\":true}")
+        }
+
+        _ = try await router.credentialFreeURLSession
+            .trustedRouterCredentialFreeData(for: request)
     }
 
     /// The status fetch is single-shot, mirroring py's `self._client.get(url)`.

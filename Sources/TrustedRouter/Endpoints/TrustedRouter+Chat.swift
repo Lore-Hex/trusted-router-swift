@@ -4,6 +4,36 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Pull adapter from typed chat chunks to non-empty text deltas. Keeping the
+/// iterator in a cursor avoids an eager producer task and continuation queue.
+private final class ChatTextCursor: @unchecked Sendable {
+    private var iterator: AsyncThrowingStream<ChatCompletionChunk, Error>.AsyncIterator
+
+    init(chunks: AsyncThrowingStream<ChatCompletionChunk, Error>) {
+        self.iterator = chunks.makeAsyncIterator()
+    }
+
+    func next() async throws -> String? {
+        while let chunk = try await iterator.next() {
+            try Task.checkCancellation()
+            if let content = chunk.choices.first?.delta?.content, !content.isEmpty {
+                return content
+            }
+        }
+        return nil
+    }
+}
+
+@available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
+func chatTextStream(
+    from chunks: AsyncThrowingStream<ChatCompletionChunk, Error>
+) -> AsyncThrowingStream<String, Error> {
+    let cursor = ChatTextCursor(chunks: chunks)
+    return AsyncThrowingStream(unfolding: {
+        try await cursor.next()
+    })
+}
+
 // L8 — chat endpoints. Plane selection + delegation only; the retry and
 // failover semantics live entirely in the transport engine.
 
@@ -124,22 +154,7 @@ extension TrustedRouter {
             params: params,
             provider: provider
         )
-        return AsyncThrowingStream { continuation in
-            let producer = Task {
-                do {
-                    for try await chunk in chunks {
-                        try Task.checkCancellation()
-                        if let content = chunk.choices.first?.delta?.content, !content.isEmpty {
-                            continuation.yield(content)
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { @Sendable _ in producer.cancel() }
-        }
+        return chatTextStream(from: chunks)
     }
 
     /// Convert a typed `ChatMessage` to the `[String: Any]` form the gateway

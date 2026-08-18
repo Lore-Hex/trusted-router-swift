@@ -12,17 +12,36 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
-    /// Replay a fully-buffered body as a byte stream. This is the ONLY
-    /// streaming shape on Linux: FoundationNetworking has no `AsyncBytes`,
-    /// so Linux "streaming" buffers via `data(for:)` and replays — the
-    /// generic payload must not promise true streaming there.
+    /// Replay a fully-buffered body as a pull byte stream. This is the ONLY
+    /// transport shape on Linux: FoundationNetworking has no `AsyncBytes`,
+    /// so Linux waits for `data(for:)` to finish and then exposes one buffered
+    /// byte per downstream demand. It is not live network streaming, but it
+    /// also does not enqueue a second eager copy of the entire body.
     static func byteStream(from data: Data) -> TrustedRouterByteStream {
-        TrustedRouterByteStream { continuation in
-            for byte in data {
-                continuation.yield(byte)
-            }
-            continuation.finish()
+        final class Cursor: @unchecked Sendable {
+            let data: Data
+            var index = 0
+
+            init(data: Data) { self.data = data }
         }
+        let cursor = Cursor(data: data)
+        return TrustedRouterByteStream(unfolding: {
+            guard cursor.index < cursor.data.count else { return nil }
+            let byte = cursor.data[cursor.index]
+            cursor.index += 1
+            return byte
+        })
+    }
+
+    /// Platform capability exposed internally for tests and documentation:
+    /// Darwin reads live URLSession bytes; Linux performs bounded-memory pull
+    /// replay only after FoundationNetworking buffers the HTTP body.
+    static var hasLiveResponseByteStreaming: Bool {
+        #if os(Linux)
+        return false
+        #else
+        return true
+        #endif
     }
 
     #if !os(Linux)

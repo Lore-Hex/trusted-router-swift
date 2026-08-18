@@ -99,10 +99,22 @@ and `subagentTool`.
 ## Features
 
 - **Asynchronous**: Built fully on modern Swift Concurrency (`async/await`, `Task`).
-- **Streaming**: Native parsing of SSE using `AsyncThrowingStream`, with `URLSession.AsyncBytes` on Apple platforms and a Linux-safe byte stream fallback.
+- **Streaming**: Pull-based SSE parsing with a 1 MiB frame cap. Apple platforms
+  use live `URLSession.AsyncBytes` with end-to-end backpressure. On Linux,
+  `FoundationNetworking` first buffers the complete HTTP response with
+  `data(for:)`; the SDK then replays those bytes on demand without a second
+  eager queue. Linux therefore preserves parser bounds and API compatibility,
+  but does **not** provide bounded-memory live network streaming.
 - **Attestation Verification**: Verifies the Confidential Space JWT using `CryptoKit`/`Security`.
 - **Pure Swift**: No 3rd party dependencies. Operates seamlessly on macOS, iOS, tvOS, watchOS, and Linux with `FoundationNetworking`.
 - **Retries**: Implements transparent exponential backoff on `429` responses and regional failover for `502`/`503`/`504` or transport errors.
+- **Transport isolation**: An injected `URLSession` contributes its
+  configuration (protocol handlers, proxy/cache/timeout/header/cookie policy),
+  but SDK sends use a private clone without its delegate or credential store.
+  This prevents ambient HTTP-auth follow-ups; TLS server trust still uses
+  Foundation's default handling. Delegate-based private-CA trust, certificate
+  pinning, mTLS/client-certificate selection, and authentication customization
+  are therefore intentionally not inherited by SDK requests.
 
 ## Domain failover
 

@@ -265,6 +265,16 @@ final class RetryAndClassificationTests: XCTestCase {
     func testRegionalAffinityPinsFastestAndFailsOverWithSameIdempotencyKey() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RegionalAffinityProtocol.self]
+        config.httpAdditionalHeaders = [
+            "Authorization": "Bearer ambient",
+            "Proxy-Authorization": "Basic ambient-proxy",
+            "Cookie": "session=ambient",
+            "Cookie2": "legacy=ambient",
+            "X-Api-Key": "ambient-api-key",
+            "X-TrustedRouter-Workspace": "ambient-workspace",
+            "Idempotency-Key": "ambient-idempotency",
+            "X-Trace-Id": "keep-ambient"
+        ]
         RegionalAffinityProtocol.reset()
         let affinityRouter = try TrustedRouter(options: .init(
             apiKey: "test_key",
@@ -279,6 +289,16 @@ final class RetryAndClassificationTests: XCTestCase {
         )
 
         XCTAssertEqual(RegionalAffinityProtocol.healthCount, 4)
+        XCTAssertEqual(RegionalAffinityProtocol.healthRequestHeaders.count, 4)
+        for headers in RegionalAffinityProtocol.healthRequestHeaders {
+            let lowercased = headers.reduce(into: [String: String]()) {
+                $0[$1.key.lowercased()] = $1.value
+            }
+            for name in TrustedRouter.credentialHeaderNames {
+                XCTAssertNil(lowercased[name], "regional health leaked \(name)")
+            }
+            XCTAssertEqual(lowercased["x-trace-id"], "keep-ambient")
+        }
         XCTAssertEqual(RegionalAffinityProtocol.healthAtFirstInference.count, 1)
         XCTAssertEqual(
             RegionalAffinityProtocol.inferenceHosts.first,
@@ -322,6 +342,7 @@ final class RetryAndClassificationTests: XCTestCase {
 private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var healthCount = 0
     nonisolated(unsafe) static var completedHealthHosts: [String] = []
+    nonisolated(unsafe) static var healthRequestHeaders: [[String: String]] = []
     nonisolated(unsafe) static var healthAtFirstInference: [String] = []
     nonisolated(unsafe) static var inferenceHosts: [String] = []
     nonisolated(unsafe) static var idempotencyKeys: [String?] = []
@@ -341,6 +362,7 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         defer { lock.unlock() }
         healthCount = 0
         completedHealthHosts = []
+        healthRequestHeaders = []
         healthAtFirstInference = []
         inferenceHosts = []
         idempotencyKeys = []
@@ -370,6 +392,7 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         if request.url?.path == "/health" {
             Self.lock.lock()
             Self.healthCount += 1
+            Self.healthRequestHeaders.append(request.allHTTPHeaderFields ?? [:])
             Self.lock.unlock()
             if host == Self.fastestHost {
                 respondHealthIfActive(host: host)

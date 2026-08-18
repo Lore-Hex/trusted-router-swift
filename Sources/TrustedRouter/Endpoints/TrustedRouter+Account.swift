@@ -76,7 +76,8 @@ extension TrustedRouter {
             req.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (data, response) = try await credentialFreeURLSession.trustedRouterData(for: req)
+        let (data, response) = try await credentialFreeURLSession
+            .trustedRouterCredentialFreeData(for: req)
         let httpResponse = try Self.httpOnly(response)
         if !(200..<300).contains(httpResponse.statusCode) {
             // Reuse the shared classifier so the public error taxonomy

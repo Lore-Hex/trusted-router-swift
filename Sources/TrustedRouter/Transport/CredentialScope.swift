@@ -5,8 +5,8 @@ import FoundationNetworking
 #endif
 
 // L4 — CREDENTIAL SCOPE. Decides whether a resolved request URL may carry
-// the SDK-attached credential headers (`authorization`,
-// `x-trustedrouter-workspace`, `idempotency-key`). Relative paths always
+// credential-shaped headers (`authorization`, proxy authorization, cookies,
+// API/workspace keys, idempotency, and SDK telemetry). Relative paths always
 // resolve against a configured or well-known TrustedRouter API/control
 // base, so they stay in scope; a caller-supplied absolute URL is in scope
 // only when its scheme, host, and effective port exactly match one of those
@@ -100,24 +100,29 @@ struct CredentialHostAllowlist: Sendable {
 }
 
 extension TrustedRouter {
-    /// The header names this SDK attaches itself. Credential scoping withholds
-    /// exactly these from out-of-scope origins, whether the value came from
-    /// stored configuration (`apiKey`, `workspaceId`, the auto-minted
-    /// idempotency key) or from the client-wide `headers` default, because on
-    /// these three names the two are indistinguishable in intent.
-    ///
-    /// This is deliberately NOT a general denylist of sensitive-looking
-    /// headers. A client-wide `cookie` or `x-api-key` default is the caller's
-    /// own configuration for their own hosts and the SDK has no basis to guess
-    /// at its sensitivity, so it is left alone — as is any header the caller
-    /// names per call in `headers:` or `options.extraHeaders`, which is the
-    /// documented way to authenticate to an out-of-scope host on purpose.
-    /// Headers injected below this layer, via a caller-supplied
-    /// `URLSessionConfiguration.httpAdditionalHeaders`, are outside the SDK's
-    /// reach entirely.
+    /// Credential-shaped names stripped from every credential-free request.
+    /// This is intentionally broader than the three fields minted by the SDK:
+    /// client defaults are ambient rather than authorization for a public
+    /// metadata host. Explicit per-call headers can still authenticate a
+    /// generic absolute request; metadata entry points expose no such escape
+    /// hatch and perform a final request scrub immediately before sending.
     static let credentialHeaderNames: Set<String> = [
         "authorization",
+        "proxy-authorization",
+        "cookie",
+        "cookie2",
+        "x-api-key",
+        "x-tr-client",
         "x-trustedrouter-workspace",
         "idempotency-key"
     ]
+
+    /// Final, case-insensitive request-level scrub for public metadata paths.
+    /// The companion credential-free URLSession copy also removes session
+    /// defaults, cookie/credential stores, and authentication delegates.
+    static func scrubCredentialHeaders(from request: inout URLRequest) {
+        for name in credentialHeaderNames {
+            request.setValue(nil, forHTTPHeaderField: name)
+        }
+    }
 }
