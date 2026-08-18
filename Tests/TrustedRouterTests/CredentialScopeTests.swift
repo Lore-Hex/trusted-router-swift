@@ -347,12 +347,15 @@ final class CredentialScopeTests: XCTestCase {
         XCTAssertEqual(credits.balance, 1.0)
     }
 
-    func testRelativeInferenceMutationStillCarriesCredentialsAndMintsIdempotencyKey() async throws {
+    func testGenericRelativeMutationCarriesCredentialsWithoutInventingReplayKey() async throws {
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.url?.absoluteString, "https://inference.test/v1/chat/completions")
             XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer test_key")
             XCTAssertEqual(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"), "test_workspace")
-            XCTAssertEqual(request.value(forHTTPHeaderField: "idempotency-key")?.hasPrefix("tr-req-"), true)
+            // Generic mutations stay unkeyed so an ambiguous failure cannot
+            // replay them. High-level billed endpoints mint their key before
+            // entering the retry engine (covered by DeepConformanceTests).
+            XCTAssertNil(request.value(forHTTPHeaderField: "idempotency-key"))
             return Self.ok(request)
         }
         let _: Data = try await router.request(

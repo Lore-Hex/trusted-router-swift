@@ -179,8 +179,16 @@ private final class DictionarySSECursor: @unchecked Sendable {
                     "TrustedRouter SSE data was not valid UTF-8"
                 )
             }
-            guard var payload = try JSONSerialization.jsonObject(with: data)
-                    as? [String: Any] else {
+            let decoded: Any
+            do {
+                decoded = try JSONSerialization.jsonObject(with: data)
+            } catch {
+                finished = true
+                throw TrustedRouterError.invalidResponse(
+                    "TrustedRouter SSE data was not a valid JSON object"
+                )
+            }
+            guard var payload = decoded as? [String: Any] else {
                 finished = true
                 throw TrustedRouterError.invalidResponse(
                     "TrustedRouter SSE data was not a JSON object"

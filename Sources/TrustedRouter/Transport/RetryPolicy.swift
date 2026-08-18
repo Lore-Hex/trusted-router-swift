@@ -11,12 +11,13 @@ import FoundationNetworking
 //
 // INVARIANTS (each line names its enforcing test):
 //  (1) Failover set {502,503,504} is a strict subset of the retry set
-//      {429, 502, 503, 504, verdict-true}.
+//      {429, 500 and above, verdict-true}.
 //      — testFailoverableStatusMovesToAnotherDomainAndCanSucceed,
 //        test429MapsToRateLimitAndCarriesRetryAfter
 //  (2) 500 NEVER moves domains — a server processed the non-idempotent
 //      inference; re-sending elsewhere risks a second generation.
-//      — testA500DoesNotMoveToAnotherDomain, test500DoesNotFailoverRetry
+//      — testA500RetriesInPlaceWithoutMovingToAnotherDomain,
+//        test500RetriesInPlaceWithoutFailover
 //  (3) Aliases exist only for the default host; the control plane always has
 //      exactly one candidate (an empty candidate list in the engine); custom
 //      bases are never redirected.

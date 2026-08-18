@@ -55,17 +55,19 @@ final class RetryAndClassificationTests: XCTestCase {
         XCTAssertEqual(SequenceProtocol.served, 1)
     }
 
-    func test501MapsToEndpointNotSupportedWithoutFailoverRetry() async {
+    func test501RetriesInPlaceThenMapsToEndpointNotSupported() async {
         SequenceProtocol.scripted = [
             (501, "", nil),
-            (200, #"{}"#, nil),
+            (501, "", nil),
+            (501, "", nil),
         ]
         do {
             let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
             XCTFail("expected endpointNotSupported")
         } catch TrustedRouterError.endpointNotSupported { /* expected */ }
         catch { XCTFail("wrong error: \(error)") }
-        XCTAssertEqual(SequenceProtocol.served, 1)
+        XCTAssertEqual(SequenceProtocol.served, 3)
+        XCTAssertEqual(SequenceProtocol.requestedHosts, ["test.local", "test.local", "test.local"])
     }
 
     func test400Range4xxMapsToBadRequest() async {
@@ -143,19 +145,14 @@ final class RetryAndClassificationTests: XCTestCase {
         )
     }
 
-    func test500DoesNotFailoverRetry() async {
+    func test500RetriesInPlaceWithoutFailover() async throws {
         SequenceProtocol.scripted = [
             (500, #"{"error":{"message":"server error"}}"#, nil),
             (200, #"{}"#, nil),
         ]
-        do {
-            let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
-            XCTFail("expected generic error")
-        } catch TrustedRouterError.generic(let code, let msg, _) {
-            XCTAssertEqual(code, 500)
-            XCTAssertEqual(msg, "server error")
-            XCTAssertEqual(SequenceProtocol.served, 1)
-        } catch { XCTFail("wrong error: \(error)") }
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+        XCTAssertEqual(SequenceProtocol.served, 2)
+        XCTAssertEqual(SequenceProtocol.requestedHosts, ["test.local", "test.local"])
     }
 
     func testFailoverableStatusRetriesInPlaceWhenRegionalFailoverDisabled() async throws {
@@ -282,10 +279,9 @@ final class RetryAndClassificationTests: XCTestCase {
             maxRetries: 1,
             regionalAffinity: true
         ))
-        let _: EmptyResponse = try await affinityRouter.request(
-            method: "POST",
-            path: "/chat/completions",
-            body: ["model": "test", "messages": []]
+        _ = try await affinityRouter.chatCompletionsChunks(
+            model: "test",
+            messages: [["role": "user", "content": "hi"]]
         )
 
         XCTAssertEqual(RegionalAffinityProtocol.healthCount, 4)
@@ -326,10 +322,9 @@ final class RetryAndClassificationTests: XCTestCase {
             regionalAffinity: true
         ))
 
-        let _: EmptyResponse = try await affinityRouter.request(
-            method: "POST",
-            path: "/chat/completions",
-            body: ["model": "test", "messages": []]
+        _ = try await affinityRouter.chatCompletionsChunks(
+            model: "test",
+            messages: [["role": "user", "content": "hi"]]
         )
 
         XCTAssertEqual(

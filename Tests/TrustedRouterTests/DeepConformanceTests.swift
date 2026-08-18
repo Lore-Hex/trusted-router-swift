@@ -149,6 +149,12 @@ final class DeepConformanceTests: XCTestCase {
     }
 
     func testHTTPAuthenticationChallengeCannotCreateSecondWireAttempt() async throws {
+        #if os(Linux)
+        throw XCTSkip(
+            "FoundationNetworking traps inside URLProtocol auth-challenge dispatch; "
+            + "the direct delegate policy test remains active here and macOS runs this wire test"
+        )
+        #else
         AuthenticationChallengeProtocol.reset()
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AuthenticationChallengeProtocol.self]
@@ -172,9 +178,16 @@ final class DeepConformanceTests: XCTestCase {
             XCTAssertEqual(statusCode, 401)
         }
         XCTAssertEqual(AuthenticationChallengeProtocol.wireAttemptCount, 1)
+        #endif
     }
 
     func testProxyAuthenticationChallengeCannotCreateSecondWireAttempt() async throws {
+        #if os(Linux)
+        throw XCTSkip(
+            "FoundationNetworking traps inside URLProtocol proxy-challenge dispatch; "
+            + "macOS retains the one-wire 407 regression"
+        )
+        #else
         AuthenticationChallengeProtocol.reset(statusCode: 407, isProxy: true)
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AuthenticationChallengeProtocol.self]
@@ -198,9 +211,16 @@ final class DeepConformanceTests: XCTestCase {
             XCTAssertEqual(statusCode, 407)
         }
         XCTAssertEqual(AuthenticationChallengeProtocol.wireAttemptCount, 1)
+        #endif
     }
 
     func testInjectedSessionDelegateCannotBypassSessionWideAuthBlocker() async throws {
+        #if os(Linux)
+        throw XCTSkip(
+            "FoundationNetworking traps inside URLProtocol NTLM-challenge dispatch; "
+            + "macOS retains the injected-delegate bypass regression"
+        )
+        #else
         AuthenticationChallengeProtocol.reset(
             statusCode: 401,
             authenticationMethod: "NSURLAuthenticationMethodNTLM"
@@ -240,6 +260,7 @@ final class DeepConformanceTests: XCTestCase {
         XCTAssertNil(router.transportURLSession.configuration.urlCredentialStorage)
         XCTAssertEqual(ambientDelegate.challengeCount, 0)
         XCTAssertEqual(AuthenticationChallengeProtocol.wireAttemptCount, 1)
+        #endif
     }
 
     private func makeRouter(maxRetries: Int) throws -> TrustedRouter {
