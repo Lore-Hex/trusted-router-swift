@@ -118,7 +118,8 @@ actor RegionalEndpointSelector {
                     request.httpMethod = "GET"
                     request.timeoutInterval = timeout
                     do {
-                        let (_, response) = try await urlSession.data(for: request)
+                        let (_, response) = try await urlSession
+                            .trustedRouterCredentialFreeData(for: request)
                         guard let http = response as? HTTPURLResponse,
                               http.statusCode == 200 || http.statusCode == 401
                         else {

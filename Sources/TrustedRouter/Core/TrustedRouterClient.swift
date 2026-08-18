@@ -22,6 +22,11 @@ public final class TrustedRouter: Sendable {
     public let baseUrl: String
     public let controlBaseURL: String
     public let urlSession: URLSession
+    /// Private send session cloned from the caller's configuration without
+    /// its ambient authentication delegate or credential store. Keeping the
+    /// public property unchanged preserves caller ownership/introspection.
+    let transportURLSession: URLSession
+    let credentialFreeURLSession: URLSession
     public let defaultHeaders: [String: String]
     public let maxRetries: Int
     public let regionalFailover: Bool
@@ -73,6 +78,8 @@ public final class TrustedRouter: Sendable {
         self.baseUrl = trimTrailingSlashes(options.baseUrl ?? TrustedRouterConstants.defaultAPIBaseURL)
         self.controlBaseURL = trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
         self.urlSession = options.urlSession
+        self.transportURLSession = options.urlSession.trustedRouterTransportCopy()
+        self.credentialFreeURLSession = options.urlSession.trustedRouterCredentialFreeCopy()
         self.defaultHeaders = options.headers
         self.maxRetries = max(0, options.maxRetries)
         self.regionalFailover = options.regionalFailover
@@ -95,7 +102,10 @@ public final class TrustedRouter: Sendable {
         if options.baseUrl == nil && options.regionalFailover && affinityEnabled {
             self.regionalEndpointSelector = RegionalEndpointSelector(
                 primaryBaseURL: self.baseUrl,
-                urlSession: options.urlSession,
+                // Health probes are public metadata reads. Use the same
+                // isolated session as status/attestation so ambient session
+                // credentials cannot reach regional hosts.
+                urlSession: self.credentialFreeURLSession,
                 timeout: options.regionProbeTimeout
             )
         } else {
@@ -247,19 +257,19 @@ public final class TrustedRouter: Sendable {
         // function, for exactly the fields the request does not set, and no
         // request-level value can mark a field absent. That layer is therefore
         // closed at the other end: `init` refuses a session whose default
-        // headers name this field at all. Unlike the credential headers, whose
-        // §-documented boundary really does stop at the SDK's own layers, this
-        // one has no reachable exception.
+        // headers name this field at all. Other injected-session credential
+        // defaults remain a caller-owned boundary for generic requests, while
+        // public metadata paths use an isolated clone plus a final scrub.
         Self.removeHeader(&out, name: ClientTelemetry.reservedHeaderName)
         if let telemetryHeaderValue {
             Self.setHeader(
                 &out, name: ClientTelemetry.reservedHeaderName, value: telemetryHeaderValue
             )
         }
-        // Credential scoping, part 2: the three headers the SDK attaches from
-        // its own stored configuration — `idempotency-key`,
-        // `x-trustedrouter-workspace`, and the Bearer `authorization` — are
-        // only injected for in-scope origins.
+        // Credential scoping, part 2: SDK-minted idempotency/workspace/Bearer
+        // values are only injected for in-scope origins. Part 1 also strips
+        // every credential-shaped client default (cookies, proxy auth, API
+        // keys, and telemetry) from credential-free requests.
         guard includeCredentials else { return out }
         if let idempotencyKey = idempotencyKey {
             Self.setHeader(&out, name: "idempotency-key", value: idempotencyKey)
@@ -316,7 +326,7 @@ public final class TrustedRouter: Sendable {
             options: options,
             body: body
         )
-        let (data, response) = try await urlSession.data(for: request)
+        let (data, response) = try await transportURLSession.trustedRouterData(for: request)
         return (data, try Self.httpOnly(response))
     }
 
@@ -344,10 +354,12 @@ public final class TrustedRouter: Sendable {
             streaming: true
         ) { request in
             #if os(Linux)
-            let (data, response) = try await self.urlSession.data(for: request)
+            let (data, response) = try await self.transportURLSession
+                .trustedRouterData(for: request)
             return (Self.byteStream(from: data), try Self.httpOnly(response))
             #else
-            let (bytes, response) = try await self.urlSession.bytes(for: request)
+            let (bytes, response) = try await self.transportURLSession
+                .trustedRouterBytes(for: request)
             return (Self.byteStream(from: bytes), try Self.httpOnly(response))
             #endif
         }
@@ -382,11 +394,12 @@ public final class TrustedRouter: Sendable {
             options: options,
             streaming: false
         ) { request in
-            let (data, response) = try await self.urlSession.data(for: request)
+            let (data, response) = try await self.transportURLSession
+                .trustedRouterData(for: request)
             return (data, try Self.httpOnly(response))
         }
 
-        if response.statusCode >= 400 {
+        if !(200..<300).contains(response.statusCode) {
             throw classifyError(statusCode: response.statusCode, data: data, response: response)
         }
 

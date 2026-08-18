@@ -4,6 +4,36 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Pull adapter from typed chat chunks to non-empty text deltas. Keeping the
+/// iterator in a cursor avoids an eager producer task and continuation queue.
+private final class ChatTextCursor: @unchecked Sendable {
+    private var iterator: AsyncThrowingStream<ChatCompletionChunk, Error>.AsyncIterator
+
+    init(chunks: AsyncThrowingStream<ChatCompletionChunk, Error>) {
+        self.iterator = chunks.makeAsyncIterator()
+    }
+
+    func next() async throws -> String? {
+        while let chunk = try await iterator.next() {
+            try Task.checkCancellation()
+            if let content = chunk.choices.first?.delta?.content, !content.isEmpty {
+                return content
+            }
+        }
+        return nil
+    }
+}
+
+@available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
+func chatTextStream(
+    from chunks: AsyncThrowingStream<ChatCompletionChunk, Error>
+) -> AsyncThrowingStream<String, Error> {
+    let cursor = ChatTextCursor(chunks: chunks)
+    return AsyncThrowingStream(unfolding: {
+        try await cursor.next()
+    })
+}
+
 // L8 — chat endpoints. Plane selection + delegation only; the retry and
 // failover semantics live entirely in the transport engine.
 
@@ -32,6 +62,11 @@ extension TrustedRouter {
         for try await chunk in stream {
             chunks.append(chunk)
         }
+        guard chunks.contains(where: { !$0.choices.isEmpty }) else {
+            throw TrustedRouterError.invalidResponse(
+                "TrustedRouter chat stream completed without a choice"
+            )
+        }
         return collectCompletion(chunks: chunks)
     }
 
@@ -49,15 +84,16 @@ extension TrustedRouter {
         body["stream"] = true
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let effectiveOptions = automaticIdempotencyOptions(options)
         let (bytes, response) = try await rawStreamRequest(
             method: "POST",
             path: "/chat/completions",
             headers: ["accept": "text/event-stream"],
             body: bodyData,
-            options: options
+            options: effectiveOptions
         )
 
-        if response.statusCode >= 400 {
+        if !(200..<300).contains(response.statusCode) {
             // Drain the body before throwing so callers see the server's
             // actual error message instead of a bare status code.
             throw try await streamingError(bytes: bytes, response: response)
@@ -118,20 +154,7 @@ extension TrustedRouter {
             params: params,
             provider: provider
         )
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    for try await chunk in chunks {
-                        if let content = chunk.choices.first?.delta?.content, !content.isEmpty {
-                            continuation.yield(content)
-                        }
-                    }
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: error)
-                }
-            }
-        }
+        return chatTextStream(from: chunks)
     }
 
     /// Convert a typed `ChatMessage` to the `[String: Any]` form the gateway
@@ -167,33 +190,94 @@ extension TrustedRouter {
             )
         }
 
-        var content = ""
-        var finishReason: String? = nil
+        var collected: [Int: CollectedChatChoice] = [:]
         for chunk in chunks {
-            if let choice = chunk.choices.first {
-                if let deltaContent = choice.delta?.content {
-                    content += deltaContent
+            for (position, choice) in chunk.choices.enumerated() {
+                let index = choice.index ?? position
+                var result = collected[index] ?? CollectedChatChoice()
+                if let delta = choice.delta {
+                    if let role = delta.role { result.role = role }
+                    if let content = delta.content { result.content += content }
+                    if let refusal = delta.refusal { result.refusal += refusal }
+                    if let reasoning = delta.reasoning { result.reasoning += reasoning }
+                    if let reasoningContent = delta.reasoningContent {
+                        result.reasoningContent += reasoningContent
+                    }
+                    if let functionCall = delta.functionCall {
+                        result.functionCall = mergeFunctionCall(
+                            result.functionCall, with: functionCall
+                        )
+                    }
+                    for (toolPosition, incoming) in (delta.toolCalls ?? []).enumerated() {
+                        let toolIndex = incoming.index ?? toolPosition
+                        var tool = result.toolCalls[toolIndex]
+                            ?? ChatToolCall(index: toolIndex)
+                        tool.id = incoming.id ?? tool.id
+                        tool.type = incoming.type ?? tool.type
+                        if let function = incoming.function {
+                            tool.function = mergeFunctionCall(tool.function, with: function)
+                        }
+                        result.toolCalls[toolIndex] = tool
+                    }
                 }
                 if let reason = choice.finishReason {
-                    finishReason = reason
+                    result.finishReason = reason
                 }
+                result.logprobs = choice.logprobs ?? result.logprobs
+                collected[index] = result
             }
         }
 
-        let last = chunks.last!
+        let choices = collected.keys.sorted().map { index -> ChatCompletion.Choice in
+            let result = collected[index]!
+            let tools = result.toolCalls.isEmpty
+                ? nil
+                : result.toolCalls.keys.sorted().map { result.toolCalls[$0]! }
+            return ChatCompletion.Choice(
+                index: index,
+                message: ChatCompletion.Choice.Message(
+                    role: result.role,
+                    content: result.content.isEmpty ? nil : result.content,
+                    refusal: result.refusal.isEmpty ? nil : result.refusal,
+                    reasoning: result.reasoning.isEmpty ? nil : result.reasoning,
+                    reasoningContent: result.reasoningContent.isEmpty
+                        ? nil : result.reasoningContent,
+                    toolCalls: tools,
+                    functionCall: result.functionCall
+                ),
+                finishReason: result.finishReason,
+                logprobs: result.logprobs
+            )
+        }
         return ChatCompletion(
-            id: last.id ?? "",
+            id: chunks.reversed().compactMap(\.id).first ?? "",
             object: "chat.completion",
-            created: last.created,
-            model: last.model,
-            choices: [
-                ChatCompletion.Choice(
-                    index: 0,
-                    message: ChatCompletion.Choice.Message(role: "assistant", content: content),
-                    finishReason: finishReason ?? "stop"
-                )
-            ],
-            usage: nil
+            created: chunks.reversed().compactMap(\.created).first,
+            model: chunks.reversed().compactMap(\.model).first,
+            systemFingerprint: chunks.reversed().compactMap(\.systemFingerprint).first,
+            choices: choices,
+            usage: chunks.reversed().compactMap(\.usage).first
         )
     }
+}
+
+private struct CollectedChatChoice {
+    var role = "assistant"
+    var content = ""
+    var refusal = ""
+    var reasoning = ""
+    var reasoningContent = ""
+    var functionCall: ChatFunctionCall?
+    var toolCalls: [Int: ChatToolCall] = [:]
+    var finishReason: String?
+    var logprobs: JSONValue?
+}
+
+private func mergeFunctionCall(
+    _ current: ChatFunctionCall?, with incoming: ChatFunctionCall
+) -> ChatFunctionCall {
+    ChatFunctionCall(
+        name: incoming.name ?? current?.name,
+        arguments: (current?.arguments ?? "") + (incoming.arguments ?? "")
+    )
 }

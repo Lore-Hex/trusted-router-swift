@@ -143,11 +143,12 @@ extension TrustedRouter {
         var req = URLRequest(url: url)
         req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
         
-        let (data, response) = try await urlSession.data(for: req)
+        let (data, response) = try await credentialFreeURLSession
+            .trustedRouterCredentialFreeData(for: req)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw TrustedRouterError.internalError("Non-HTTP response")
         }
-        if httpResponse.statusCode >= 400 {
+        if !(200..<300).contains(httpResponse.statusCode) {
             throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Attestation fetch failed", payload: nil)
         }
         return data
@@ -168,11 +169,12 @@ public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultT
     var req = URLRequest(url: url)
     req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
     
-    let (data, response) = try await urlSession.data(for: req)
+    let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
+        .trustedRouterCredentialFreeData(for: req)
     guard let httpResponse = response as? HTTPURLResponse else {
         throw TrustedRouterError.internalError("Non-HTTP response")
     }
-    if httpResponse.statusCode >= 400 {
+    if !(200..<300).contains(httpResponse.statusCode) {
         throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Trust release fetch failed", payload: nil)
     }
     guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -284,8 +286,11 @@ public func verifyGatewayAttestation(
         guard let url = URL(string: jwksUrl) else {
             throw AttestationVerificationError("Invalid JWKS URL")
         }
-        let (data, response) = try await urlSession.data(from: url)
-        if let resp = response as? HTTPURLResponse, resp.statusCode >= 400 {
+        let request = URLRequest(url: url)
+        let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
+            .trustedRouterCredentialFreeData(for: request)
+        if let resp = response as? HTTPURLResponse,
+           !(200..<300).contains(resp.statusCode) {
             throw AttestationVerificationError("JWKS fetch returned HTTP \(resp.statusCode)")
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {

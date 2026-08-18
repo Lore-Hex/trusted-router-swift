@@ -16,12 +16,13 @@ import FoundationNetworking
 //
 // INVARIANTS (each line names its enforcing test):
 //  (1) Failover set {502,503,504} is a strict subset of the retry set
-//      {429, 502, 503, 504, verdict-true}.
+//      {429, 500 and above, verdict-true}.
 //      — testFailoverableStatusMovesToAnotherDomainAndCanSucceed,
 //        test429MapsToRateLimitAndCarriesRetryAfter
 //  (2) 500 NEVER moves domains — a server processed the non-idempotent
 //      inference; re-sending elsewhere risks a second generation.
-//      — testA500DoesNotMoveToAnotherDomain, test500DoesNotFailoverRetry
+//      — testA500RetriesInPlaceWithoutMovingToAnotherDomain,
+//        test500RetriesInPlaceWithoutFailover
 //  (3) Aliases exist only for the default host; the control plane always has
 //      an empty candidate list here, so failover is structurally impossible;
 //      custom bases are never redirected.
@@ -72,17 +73,13 @@ extension TrustedRouter {
         streaming: Bool = false,
         sendAttempt: (URLRequest) async throws -> (Payload, HTTPURLResponse)
     ) async throws -> (Payload, HTTPURLResponse) {
-        // (Invariant 5) The idempotency key is minted ONCE, before the loop,
-        // and only for relative inference-plane mutations. Control-plane
-        // POSTs (billingCheckout, broadcast CRUD) intentionally get no
-        // auto-minted key.
-        var effectiveOptions = options
+        // High-level billed/mutating endpoints opt in before entering this
+        // generic engine. A generic mutation without a caller key stays
+        // unkeyed and therefore cannot be replayed after an ambiguous I/O or
+        // HTTP failure.
+        let effectiveOptions = options
         let inference = usesInferenceBase(path: path, plane: plane)
-        if inference,
-           effectiveOptions.idempotencyKey == nil,
-           !["GET", "HEAD", "OPTIONS"].contains(method.uppercased()) {
-            effectiveOptions.idempotencyKey = "tr-req-\(UUID().uuidString)"
-        }
+        let replayable = isReplayable(method: method, options: effectiveOptions)
 
         var attempt = 0
         var candidateIndex = 0
@@ -125,7 +122,8 @@ extension TrustedRouter {
             do {
                 let (payload, http) = try await sendAttempt(request)
                 recorder?.onResponse(statusCode: http.statusCode)
-                guard attempt < maxRetries,
+                guard replayable,
+                      attempt < maxRetries,
                       RetryPolicy.shouldRetry(
                           statusCode: http.statusCode,
                           path: path,
@@ -152,7 +150,8 @@ extension TrustedRouter {
                 // below keeps only a message string, after which dns vs tls
                 // vs connect-refused is unrecoverable (§6.1).
                 recorder?.onTransportError(error)
-                guard attempt < maxRetries,
+                guard replayable,
+                      attempt < maxRetries,
                       RetryPolicy.shouldRetryTransportError(path: path, plane: plane)
                 else {
                     throw TrustedRouterError.internalError(error.localizedDescription)
@@ -223,5 +222,23 @@ extension TrustedRouter {
             throw TrustedRouterError.internalError("Non-HTTP response")
         }
         return http
+    }
+
+    /// Mint a stable key exactly once for a high-level logical mutation.
+    func automaticIdempotencyOptions(_ options: PerCallOptions) -> PerCallOptions {
+        guard options.idempotencyKey == nil || options.idempotencyKey?.isEmpty == true else {
+            return options
+        }
+        var effective = options
+        effective.idempotencyKey = "tr-req-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        return effective
+    }
+
+    private func isReplayable(method: String, options: PerCallOptions) -> Bool {
+        if ["GET", "HEAD", "OPTIONS"].contains(method.uppercased()) {
+            return true
+        }
+        guard let key = options.idempotencyKey else { return false }
+        return !key.isEmpty
     }
 }

@@ -23,7 +23,10 @@ extension TrustedRouter {
         if body["workspace_id"] == nil && options.workspaceId != nil {
             body["workspace_id"] = options.workspaceId
         }
-        return try await request(method: "POST", path: "/billing/checkout", body: body, options: options, plane: .control)
+        return try await request(
+            method: "POST", path: "/billing/checkout", body: body,
+            options: automaticIdempotencyOptions(options), plane: .control
+        )
     }
 
     public func authSession() async throws -> AuthSessionResponse {
@@ -31,7 +34,10 @@ extension TrustedRouter {
     }
 
     public func logout() async throws -> EmptyResponse {
-        return try await request(method: "POST", path: "/auth/logout", plane: .control)
+        return try await request(
+            method: "POST", path: "/auth/logout",
+            options: automaticIdempotencyOptions(PerCallOptions()), plane: .control
+        )
     }
 
     public func activity(params: [String: Any] = [:]) async throws -> ActivityResponse {
@@ -70,9 +76,10 @@ extension TrustedRouter {
             req.setValue(value, forHTTPHeaderField: name)
         }
 
-        let (data, response) = try await urlSession.data(for: req)
+        let (data, response) = try await credentialFreeURLSession
+            .trustedRouterCredentialFreeData(for: req)
         let httpResponse = try Self.httpOnly(response)
-        if httpResponse.statusCode >= 400 {
+        if !(200..<300).contains(httpResponse.statusCode) {
             // Reuse the shared classifier so the public error taxonomy
             // (.authentication / .rateLimit with Retry-After / …) and the
             // server's message and payload survive this path.

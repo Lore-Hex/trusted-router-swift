@@ -389,7 +389,11 @@ public func exchangeOAuthKey(
     }
     // Public-client exchange: an empty apiKey suppresses the Authorization
     // header in the client's header builder.
-    let client = try TrustedRouter(options: .init(apiKey: "", controlBaseURL: baseURL, urlSession: urlSession))
+    let client = try TrustedRouter(options: .init(
+        apiKey: "",
+        controlBaseURL: baseURL,
+        urlSession: urlSession.trustedRouterCredentialFreeCopy()
+    ))
     var body: [String: Any] = ["code": code]
     if let codeVerifier { body["code_verifier"] = codeVerifier }
     if let codeChallengeMethod { body["code_challenge_method"] = codeChallengeMethod }

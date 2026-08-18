@@ -67,7 +67,7 @@ final class FusionTests: XCTestCase {
         MockURLProtocol.requestHandler = { request in
             XCTAssertEqual(request.url?.path, "/v1/chat/completions")
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/event-stream"])!
-            let sse = "data: {\"id\": \"fz-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"ok\"}, \"finish_reason\": \"stop\"}]}\n\n"
+            let sse = "data: {\"id\": \"fz-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"ok\"}, \"finish_reason\": \"stop\"}]}\n\ndata: [DONE]\n\n"
             return (response, sse.data(using: .utf8)!)
         }
 

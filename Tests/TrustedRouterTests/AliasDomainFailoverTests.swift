@@ -97,10 +97,9 @@ final class AliasDomainFailoverTests: XCTestCase {
                       "never reached an alias: \(AliasSequenceProtocol.requestedHosts)")
     }
 
-    func testA500DoesNotMoveToAnotherDomain() async throws {
-        // A 500 means a server received and processed the request. Inference is
-        // not idempotent, so re-running it on another domain risks charging
-        // twice. Failover is for connection failures and 502/503/504 only.
+    func testA500RetriesInPlaceWithoutMovingToAnotherDomain() async throws {
+        // 500 is retryable, but not failoverable. A replay-safe request may be
+        // retried on the same host; it must never move to an alias.
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [AliasSequenceProtocol.self]
         AliasSequenceProtocol.reset()
@@ -114,16 +113,11 @@ final class AliasDomainFailoverTests: XCTestCase {
             maxRetries: 2
         ))
 
-        do {
-            let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
-            XCTFail("expected a 500 to surface")
-        } catch TrustedRouterError.generic(let code, _, _) {
-            XCTAssertEqual(code, 500)
-        }
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
 
         XCTAssertEqual(Set(AliasSequenceProtocol.requestedHosts), ["api.trustedrouter.com"],
                        "a 500 leaked to another domain")
-        XCTAssertEqual(AliasSequenceProtocol.served, 1, "the scripted 200 must never be reached")
+        XCTAssertEqual(AliasSequenceProtocol.served, 2, "the in-host retry must recover")
     }
 
     func testTheAliasesSurviveAFailedHealthRace() async {

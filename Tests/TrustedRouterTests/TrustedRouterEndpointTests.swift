@@ -163,7 +163,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
             XCTAssertEqual(request.url?.path, "/v1/chat/completions")
             
             let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/event-stream"])!
-            let sseData = "data: {\"id\": \"chat-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Hello\"}}]}\n\ndata: {\"id\": \"chat-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" world\"}, \"finish_reason\": \"stop\"}]}\n\n"
+            let sseData = "data: {\"id\": \"chat-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Hello\"}}]}\n\ndata: {\"id\": \"chat-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"content\": \" world\"}, \"finish_reason\": \"stop\"}]}\n\ndata: [DONE]\n\n"
             return (response, sseData.data(using: .utf8)!)
         }
 
@@ -188,7 +188,7 @@ final class TrustedRouterEndpointTests: XCTestCase {
                 httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "text/event-stream"]
             )!
-            let data = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+            let data = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
             return (response, data.data(using: .utf8)!)
         }
 

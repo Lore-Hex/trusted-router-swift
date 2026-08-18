@@ -55,17 +55,19 @@ final class RetryAndClassificationTests: XCTestCase {
         XCTAssertEqual(SequenceProtocol.served, 1)
     }
 
-    func test501MapsToEndpointNotSupportedWithoutFailoverRetry() async {
+    func test501RetriesInPlaceThenMapsToEndpointNotSupported() async {
         SequenceProtocol.scripted = [
             (501, "", nil),
-            (200, #"{}"#, nil),
+            (501, "", nil),
+            (501, "", nil),
         ]
         do {
             let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
             XCTFail("expected endpointNotSupported")
         } catch TrustedRouterError.endpointNotSupported { /* expected */ }
         catch { XCTFail("wrong error: \(error)") }
-        XCTAssertEqual(SequenceProtocol.served, 1)
+        XCTAssertEqual(SequenceProtocol.served, 3)
+        XCTAssertEqual(SequenceProtocol.requestedHosts, ["test.local", "test.local", "test.local"])
     }
 
     func test400Range4xxMapsToBadRequest() async {
@@ -143,19 +145,14 @@ final class RetryAndClassificationTests: XCTestCase {
         )
     }
 
-    func test500DoesNotFailoverRetry() async {
+    func test500RetriesInPlaceWithoutFailover() async throws {
         SequenceProtocol.scripted = [
             (500, #"{"error":{"message":"server error"}}"#, nil),
             (200, #"{}"#, nil),
         ]
-        do {
-            let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
-            XCTFail("expected generic error")
-        } catch TrustedRouterError.generic(let code, let msg, _) {
-            XCTAssertEqual(code, 500)
-            XCTAssertEqual(msg, "server error")
-            XCTAssertEqual(SequenceProtocol.served, 1)
-        } catch { XCTFail("wrong error: \(error)") }
+        let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
+        XCTAssertEqual(SequenceProtocol.served, 2)
+        XCTAssertEqual(SequenceProtocol.requestedHosts, ["test.local", "test.local"])
     }
 
     func testFailoverableStatusRetriesInPlaceWhenRegionalFailoverDisabled() async throws {
@@ -265,6 +262,16 @@ final class RetryAndClassificationTests: XCTestCase {
     func testRegionalAffinityPinsFastestAndFailsOverWithSameIdempotencyKey() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [RegionalAffinityProtocol.self]
+        config.httpAdditionalHeaders = [
+            "Authorization": "Bearer ambient",
+            "Proxy-Authorization": "Basic ambient-proxy",
+            "Cookie": "session=ambient",
+            "Cookie2": "legacy=ambient",
+            "X-Api-Key": "ambient-api-key",
+            "X-TrustedRouter-Workspace": "ambient-workspace",
+            "Idempotency-Key": "ambient-idempotency",
+            "X-Trace-Id": "keep-ambient"
+        ]
         RegionalAffinityProtocol.reset()
         let affinityRouter = try TrustedRouter(options: .init(
             apiKey: "test_key",
@@ -272,13 +279,38 @@ final class RetryAndClassificationTests: XCTestCase {
             maxRetries: 1,
             regionalAffinity: true
         ))
-        let _: EmptyResponse = try await affinityRouter.request(
-            method: "POST",
-            path: "/chat/completions",
-            body: ["model": "test", "messages": []]
+        let isolatedDefaults = (affinityRouter.credentialFreeURLSession
+            .configuration.httpAdditionalHeaders ?? [:]).reduce(into: [String: String]()) {
+                $0[String(describing: $1.key).lowercased()] = String(describing: $1.value)
+            }
+        for name in TrustedRouter.credentialHeaderNames {
+            XCTAssertNil(isolatedDefaults[name], "isolated default retained \(name)")
+        }
+        XCTAssertEqual(isolatedDefaults["x-trace-id"], "keep-ambient")
+        _ = try await affinityRouter.chatCompletionsChunks(
+            model: "test",
+            messages: [["role": "user", "content": "hi"]]
         )
 
         XCTAssertEqual(RegionalAffinityProtocol.healthCount, 4)
+        XCTAssertEqual(RegionalAffinityProtocol.healthRequestHeaders.count, 4)
+        for headers in RegionalAffinityProtocol.healthRequestHeaders {
+            let lowercased = headers.reduce(into: [String: String]()) {
+                $0[$1.key.lowercased()] = $1.value
+            }
+            for name in TrustedRouter.credentialHeaderNames {
+                XCTAssertNil(lowercased[name], "regional health leaked \(name)")
+            }
+            // corelibs-foundation keeps this benign session default in the
+            // cloned configuration, but unlike Darwin does not merge it into
+            // requests delivered through a custom URLProtocol. Credential
+            // absence above remains mandatory and cross-platform.
+            #if canImport(FoundationNetworking)
+            XCTAssertNil(lowercased["x-trace-id"])
+            #else
+            XCTAssertEqual(lowercased["x-trace-id"], "keep-ambient")
+            #endif
+        }
         XCTAssertEqual(RegionalAffinityProtocol.healthAtFirstInference.count, 1)
         XCTAssertEqual(
             RegionalAffinityProtocol.inferenceHosts.first,
@@ -306,10 +338,9 @@ final class RetryAndClassificationTests: XCTestCase {
             regionalAffinity: true
         ))
 
-        let _: EmptyResponse = try await affinityRouter.request(
-            method: "POST",
-            path: "/chat/completions",
-            body: ["model": "test", "messages": []]
+        _ = try await affinityRouter.chatCompletionsChunks(
+            model: "test",
+            messages: [["role": "user", "content": "hi"]]
         )
 
         XCTAssertEqual(
@@ -322,6 +353,7 @@ final class RetryAndClassificationTests: XCTestCase {
 private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var healthCount = 0
     nonisolated(unsafe) static var completedHealthHosts: [String] = []
+    nonisolated(unsafe) static var healthRequestHeaders: [[String: String]] = []
     nonisolated(unsafe) static var healthAtFirstInference: [String] = []
     nonisolated(unsafe) static var inferenceHosts: [String] = []
     nonisolated(unsafe) static var idempotencyKeys: [String?] = []
@@ -341,6 +373,7 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         defer { lock.unlock() }
         healthCount = 0
         completedHealthHosts = []
+        healthRequestHeaders = []
         healthAtFirstInference = []
         inferenceHosts = []
         idempotencyKeys = []
@@ -370,6 +403,7 @@ private final class RegionalAffinityProtocol: URLProtocol, @unchecked Sendable {
         if request.url?.path == "/health" {
             Self.lock.lock()
             Self.healthCount += 1
+            Self.healthRequestHeaders.append(request.allHTTPHeaderFields ?? [:])
             Self.lock.unlock()
             if host == Self.fastestHost {
                 respondHealthIfActive(host: host)

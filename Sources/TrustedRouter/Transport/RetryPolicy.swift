@@ -11,12 +11,13 @@ import FoundationNetworking
 //
 // INVARIANTS (each line names its enforcing test):
 //  (1) Failover set {502,503,504} is a strict subset of the retry set
-//      {429, 502, 503, 504, verdict-true}.
+//      {429, 500 and above, verdict-true}.
 //      — testFailoverableStatusMovesToAnotherDomainAndCanSucceed,
 //        test429MapsToRateLimitAndCarriesRetryAfter
 //  (2) 500 NEVER moves domains — a server processed the non-idempotent
 //      inference; re-sending elsewhere risks a second generation.
-//      — testA500DoesNotMoveToAnotherDomain, test500DoesNotFailoverRetry
+//      — testA500RetriesInPlaceWithoutMovingToAnotherDomain,
+//        test500RetriesInPlaceWithoutFailover
 //  (3) Aliases exist only for the default host; the control plane always has
 //      exactly one candidate (an empty candidate list in the engine); custom
 //      bases are never redirected.
@@ -155,14 +156,14 @@ enum RetryPolicy {
         response: HTTPURLResponse?
     ) -> Bool {
         if let response, let verdict = shouldRetryVerdict(response) { return verdict }
-        if statusCode == 429 { return true }
-        return usesInferenceBase(path: path, plane: plane) && isFailoverableStatus(statusCode, response)
+        return statusCode == 429 || statusCode >= 500
     }
 
-    /// A transport failure means no server saw the request, so re-sending is
-    /// always safe; the flag only decides whether the retry may change host.
+    /// Transport failures are retry candidates, but the engine separately
+    /// requires a safe method or idempotency key before replaying: an I/O
+    /// error can happen after a server has already received the request.
     static func shouldRetryTransportError(path: String, plane: TrustedRouterRequestPlane) -> Bool {
-        return usesInferenceBase(path: path, plane: plane)
+        return true
     }
 
     /// Jittered exponential backoff (500ms base, 30s cap), floored by any

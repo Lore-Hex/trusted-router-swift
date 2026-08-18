@@ -123,6 +123,22 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(r.status, "completed")
     }
 
+    func testResponseObjectPreservesOutputUsageAndError() throws {
+        let json = #"{"id":"r_1","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1},"error":null}"#
+        let response = try JSONDecoder().decode(ResponseObject.self, from: Data(json.utf8))
+        XCTAssertEqual(response.output?.count, 1)
+        XCTAssertEqual(response.usage, .object(["input_tokens": .integer(2), "output_tokens": .integer(1)]))
+        XCTAssertEqual(response.error, .null)
+    }
+
+    func testChunkPreservesUsageReasoningAndToolCalls() throws {
+        let json = #"{"id":"c1","choices":[{"index":0,"delta":{"reasoning_content":"think","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\\\"q\\\":"}}]}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}"#
+        let chunk = try JSONDecoder().decode(ChatCompletionChunk.self, from: Data(json.utf8))
+        XCTAssertEqual(chunk.usage?.totalTokens, 3)
+        XCTAssertEqual(chunk.choices[0].delta?.reasoningContent, "think")
+        XCTAssertEqual(chunk.choices[0].delta?.toolCalls?[0].function?.name, "lookup")
+    }
+
     func testResponseInputTokens() throws {
         let json = #"{"input_tokens": 42, "total_tokens": 60}"#
         let t = try JSONDecoder().decode(ResponseInputTokens.self, from: Data(json.utf8))

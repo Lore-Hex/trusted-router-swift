@@ -25,7 +25,10 @@ extension TrustedRouter {
         if let dimensions = dimensions { body["dimensions"] = dimensions }
         if let user = user { body["user"] = user }
 
-        return try await request(method: "POST", path: "/embeddings", body: body, options: options)
+        return try await request(
+            method: "POST", path: "/embeddings", body: body,
+            options: automaticIdempotencyOptions(options)
+        )
     }
 
     public func messages(
@@ -41,7 +44,10 @@ extension TrustedRouter {
         body["messages"] = messages
         body["max_tokens"] = maxTokens
 
-        return try await request(method: "POST", path: "/messages", body: body, options: options)
+        return try await request(
+            method: "POST", path: "/messages", body: body,
+            options: automaticIdempotencyOptions(options)
+        )
     }
 
     public func responses(
@@ -60,7 +66,10 @@ extension TrustedRouter {
             body["instructions"] = instructions
         }
 
-        return try await request(method: "POST", path: "/responses", body: body, options: options)
+        return try await request(
+            method: "POST", path: "/responses", body: body,
+            options: automaticIdempotencyOptions(options)
+        )
     }
 
     @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
@@ -81,15 +90,16 @@ extension TrustedRouter {
         }
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let effectiveOptions = automaticIdempotencyOptions(options)
         let (bytes, response) = try await rawStreamRequest(
             method: "POST",
             path: "/responses",
             headers: ["accept": "text/event-stream"],
             body: bodyData,
-            options: options
+            options: effectiveOptions
         )
 
-        if response.statusCode >= 400 {
+        if !(200..<300).contains(response.statusCode) {
             throw try await streamingError(bytes: bytes, response: response)
         }
 
@@ -113,6 +123,9 @@ extension TrustedRouter {
 
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "POST", path: "/responses/input_tokens", body: body, options: options)
+        return try await request(
+            method: "POST", path: "/responses/input_tokens", body: body,
+            options: automaticIdempotencyOptions(options)
+        )
     }
 }
