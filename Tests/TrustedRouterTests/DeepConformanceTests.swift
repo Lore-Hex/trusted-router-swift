@@ -62,10 +62,20 @@ final class DeepConformanceTests: XCTestCase {
             "X-Trace-Id": "keep-ambient"
         ]
 
+        let injectedSession = URLSession(configuration: config)
+        let isolatedDefaults = (injectedSession.trustedRouterCredentialFreeCopy()
+            .configuration.httpAdditionalHeaders ?? [:]).reduce(into: [String: String]()) {
+                $0[String(describing: $1.key).lowercased()] = String(describing: $1.value)
+            }
+        for name in TrustedRouter.credentialHeaderNames {
+            XCTAssertNil(isolatedDefaults[name], "isolated default retained \(name)")
+        }
+        XCTAssertEqual(isolatedDefaults["x-trace-id"], "keep-ambient")
+
         let token = try await exchangeOAuthKey(
             code: "code",
             baseURL: "https://control.test/v1",
-            urlSession: URLSession(configuration: config)
+            urlSession: injectedSession
         )
 
         XCTAssertEqual(token.key, "delegated")
@@ -78,7 +88,16 @@ final class DeepConformanceTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "Idempotency-Key"))
         XCTAssertNil(request.value(forHTTPHeaderField: "X-TR-CLIENT"))
         XCTAssertNil(request.value(forHTTPHeaderField: "X-TrustedRouter-Workspace"))
+        // Darwin merges benign URLSession defaults into the URLRequest seen
+        // by a custom URLProtocol. FoundationNetworking retains the default
+        // in the copied configuration but does not expose that merge to its
+        // custom URLProtocol path. The security contract above is identical
+        // on both platforms; only this test transport's observability differs.
+        #if canImport(FoundationNetworking)
+        XCTAssertNil(request.value(forHTTPHeaderField: "X-Trace-Id"))
+        #else
         XCTAssertEqual(request.value(forHTTPHeaderField: "X-Trace-Id"), "keep-ambient")
+        #endif
     }
 
     func testRedirectDelegateAlwaysSurfacesOriginalResponse() {

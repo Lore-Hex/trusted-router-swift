@@ -279,6 +279,14 @@ final class RetryAndClassificationTests: XCTestCase {
             maxRetries: 1,
             regionalAffinity: true
         ))
+        let isolatedDefaults = (affinityRouter.credentialFreeURLSession
+            .configuration.httpAdditionalHeaders ?? [:]).reduce(into: [String: String]()) {
+                $0[String(describing: $1.key).lowercased()] = String(describing: $1.value)
+            }
+        for name in TrustedRouter.credentialHeaderNames {
+            XCTAssertNil(isolatedDefaults[name], "isolated default retained \(name)")
+        }
+        XCTAssertEqual(isolatedDefaults["x-trace-id"], "keep-ambient")
         _ = try await affinityRouter.chatCompletionsChunks(
             model: "test",
             messages: [["role": "user", "content": "hi"]]
@@ -293,7 +301,15 @@ final class RetryAndClassificationTests: XCTestCase {
             for name in TrustedRouter.credentialHeaderNames {
                 XCTAssertNil(lowercased[name], "regional health leaked \(name)")
             }
+            // corelibs-foundation keeps this benign session default in the
+            // cloned configuration, but unlike Darwin does not merge it into
+            // requests delivered through a custom URLProtocol. Credential
+            // absence above remains mandatory and cross-platform.
+            #if canImport(FoundationNetworking)
+            XCTAssertNil(lowercased["x-trace-id"])
+            #else
             XCTAssertEqual(lowercased["x-trace-id"], "keep-ambient")
+            #endif
         }
         XCTAssertEqual(RegionalAffinityProtocol.healthAtFirstInference.count, 1)
         XCTAssertEqual(
