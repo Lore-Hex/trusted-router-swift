@@ -56,6 +56,22 @@ prompt-cache locality. Set `regionalAffinity: false` to keep using only the glob
 custom `baseUrl` is never probed or rewritten; a custom `URLSession` defaults
 affinity off unless `regionalAffinity: true` is explicit.
 
+### Client reliability telemetry
+
+For known TrustedRouter inference and control hosts, content-free reliability
+telemetry defaults on. Each inference attempt carries the bounded
+`x-tr-client` header, and a background reporter sends sampled request outcomes
+plus exact per-minute counters to the control plane. The reporter has its own
+single-shot `URLSession`; it never uses an injected session or the inference
+retry/failover engine. Set `telemetrySampleRate` to tune otherwise healthy
+single-attempt sampling (failures, retries/failover, and calls over 30 seconds
+remain at 100%). Call `close()` or `shutdown()` for a final flush bounded to two
+seconds.
+
+Set `telemetry: false`, `TRUSTEDROUTER_TELEMETRY=0`, or `DO_NOT_TRACK=1` to
+disable both channels. `TRUSTEDROUTER_TELEMETRY_DEBUG=1` echoes each
+content-free batch JSON to stderr before delivery.
+
 ### Fusion
 
 Fan a request across a panel of models and let a judge model pick or synthesize

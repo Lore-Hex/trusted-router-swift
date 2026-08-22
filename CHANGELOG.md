@@ -7,15 +7,18 @@ All notable changes to this SDK are documented here. Format roughly follows
 ## Unreleased
 
 ### Added
-- Content-free client reliability telemetry, header channel only
+- Content-free client reliability telemetry, contract v1 header and beacon
   (client-telemetry contract v1): every inference-plane attempt carries an
   `x-tr-client` header describing the attempt index, the previous attempt's
-  outcome/class/host/timing, streaming, and failover use. Configured with the
-  new `TrustedRouterOptions.telemetry` option, honouring the documented
+  outcome/class/host/timing, streaming, and failover use. A bounded,
+  out-of-engine reporter also sends sampled diagnostics and exact minute
+  counters to `/v1/client-events` from its own single-shot `URLSession`.
+  Configured with `TrustedRouterOptions.telemetry` and
+  `telemetrySampleRate`, honouring the documented
   `TRUSTEDROUTER_TELEMETRY` > `DO_NOT_TRACK` precedence, defaulting on only
-  for known TrustedRouter hosts. Custom base URLs and control-plane calls
-  never send it; the beacon channel is deliberately deferred per the
-  contract's rollout order.
+  for known TrustedRouter hosts. Control-plane calls are never recorded.
+  The contract owner's 2026-08-21 decision supersedes the earlier
+  Python-first rollout ordering and ships beacons in every SDK now.
 - `x-tr-client` is SDK-reserved: a caller-supplied value is stripped from
   every header layer the SDK merges, and because a header set in an injected
   session's `URLSessionConfiguration.httpAdditionalHeaders` is merged by the

@@ -28,13 +28,17 @@ final class ClientTelemetryHeaderTests: XCTestCase {
     ) throws -> TrustedRouter {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TelemetryCaptureProtocol.self]
-        return try TrustedRouter(options: .init(
+        var options = TrustedRouterOptions(
             apiKey: "test_key",
             baseUrl: baseUrl,
             urlSession: URLSession(configuration: config),
             maxRetries: maxRetries,
             telemetry: telemetry
-        ))
+        )
+        let beaconConfig = URLSessionConfiguration.ephemeral
+        beaconConfig.protocolClasses = [HeaderBeaconProtocol.self]
+        options.telemetryURLSession = URLSession(configuration: beaconConfig)
+        return try TrustedRouter(options: options)
     }
 
     private func assertMatches(
@@ -366,12 +370,16 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
         // With telemetry on, the recorder's own value replaces it rather than
         // appending a second case-variant.
-        let onRouter = try TrustedRouter(options: .init(
+        var onOptions = TrustedRouterOptions(
             apiKey: "test_key",
             urlSession: URLSession(configuration: config),
             headers: ["X-TR-CLIENT": "v=1;a=6;s=1"],
             telemetry: true
-        ))
+        )
+        let onBeaconConfig = URLSessionConfiguration.ephemeral
+        onBeaconConfig.protocolClasses = [HeaderBeaconProtocol.self]
+        onOptions.telemetryURLSession = URLSession(configuration: onBeaconConfig)
+        let onRouter = try TrustedRouter(options: onOptions)
         let _: EmptyResponse = try await onRouter.request(method: "GET", path: "/x")
         XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil, "v=1;a=0;s=0"])
     }
@@ -540,11 +548,15 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [TelemetryCaptureProtocol.self]
         config.httpAdditionalHeaders = ["x-corp-trace": "session-level"]
-        let router = try TrustedRouter(options: .init(
+        var options = TrustedRouterOptions(
             apiKey: "test_key",
             urlSession: URLSession(configuration: config),
             telemetry: true
-        ))
+        )
+        let beaconConfig = URLSessionConfiguration.ephemeral
+        beaconConfig.protocolClasses = [HeaderBeaconProtocol.self]
+        options.telemetryURLSession = URLSession(configuration: beaconConfig)
+        let router = try TrustedRouter(options: options)
 
         let _: EmptyResponse = try await router.request(method: "GET", path: "/x")
 
@@ -573,8 +585,7 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
     func testNoTelemetryHTTPCallsExist() async throws {
         // §6.4: the SDK's own fake transport sees zero /client-events calls.
-        // The beacon channel is deliberately absent from this PR; this pins
-        // that no code path grew a telemetry POST.
+        // Beacon delivery exists, but it must use its separate session.
         TelemetryCaptureProtocol.reset()
         TelemetryCaptureProtocol.scripted = [
             .failure(URLError(.timedOut)),
@@ -586,7 +597,7 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
         XCTAssertTrue(
             TelemetryCaptureProtocol.requestedPaths.allSatisfy { !$0.contains("client-events") },
-            "no beacon traffic may exist in the header-only PR: \(TelemetryCaptureProtocol.requestedPaths)"
+            "beacon traffic must never ride the user's transport: \(TelemetryCaptureProtocol.requestedPaths)"
         )
     }
 
@@ -985,6 +996,26 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         )!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+/// Separate beacon endpoint fake used by header-channel tests so their
+/// injected inference transport remains a proof that /client-events never
+/// rides the user's URLSession.
+private final class HeaderBeaconProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://invalid.local")!,
+            statusCode: 202,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"policy":{}}"#.utf8))
         client?.urlProtocolDidFinishLoading(self)
     }
 }

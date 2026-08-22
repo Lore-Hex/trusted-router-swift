@@ -19,9 +19,11 @@ private final class SSEEventCursor: @unchecked Sendable {
     private var iterator: TrustedRouterByteStream.AsyncIterator
     private var buffer = Data()
     private var ended = false
+    private let recorder: RequestRecorder?
 
-    init(bytes: TrustedRouterByteStream) {
+    init(bytes: TrustedRouterByteStream, recorder: RequestRecorder? = nil) {
         self.iterator = bytes.makeAsyncIterator()
+        self.recorder = recorder
     }
 
     func next() async throws -> SSEEvent? {
@@ -58,6 +60,7 @@ private final class SSEEventCursor: @unchecked Sendable {
             }
             buffer.removeAll(keepingCapacity: true)
             if let event = SSEParser.parseFrame(frame) {
+                recorder?.onFirstEvent()
                 return event
             }
             // Comment-only/unknown-field frames are ignored, but still read
@@ -76,7 +79,14 @@ public enum SSEParser {
     public static func stream(
         from bytes: TrustedRouterByteStream
     ) -> AsyncThrowingStream<SSEEvent, Error> {
-        let cursor = SSEEventCursor(bytes: bytes)
+        stream(from: bytes, recorder: nil)
+    }
+
+    static func stream(
+        from bytes: TrustedRouterByteStream,
+        recorder: RequestRecorder?
+    ) -> AsyncThrowingStream<SSEEvent, Error> {
+        let cursor = SSEEventCursor(bytes: bytes, recorder: recorder)
         return AsyncThrowingStream(unfolding: {
             try await cursor.next()
         })
@@ -107,18 +117,44 @@ private final class TypedSSECursor<T: Decodable>: @unchecked Sendable {
     private var iterator: AsyncThrowingStream<SSEEvent, Error>.AsyncIterator
     private let decoder = JSONDecoder()
     private var finished = false
+    private let recorder: RequestRecorder?
 
-    init(events: AsyncThrowingStream<SSEEvent, Error>) {
+    init(events: AsyncThrowingStream<SSEEvent, Error>, recorder: RequestRecorder? = nil) {
         self.iterator = events.makeAsyncIterator()
+        self.recorder = recorder
+    }
+
+    deinit {
+        if !finished {
+            recorder?.onAborted()
+            recorder?.finish()
+        }
     }
 
     func next() async throws -> T? {
+        do {
+            return try await nextValue()
+        } catch is CancellationError {
+            recorder?.onAborted()
+            recorder?.finish()
+            throw CancellationError()
+        } catch {
+            recorder?.onTransportError(
+                error, responseOpened: true, bodyStarted: recorder?.ttftMs != nil
+            )
+            recorder?.finish()
+            throw error
+        }
+    }
+
+    private func nextValue() async throws -> T? {
         guard !finished else { return nil }
         while let event = try await iterator.next() {
             try Task.checkCancellation()
             let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedData == "[DONE]" {
                 finished = true
+                recorder?.finish()
                 return nil
             }
             guard let data = trimmedData.data(using: .utf8) else {
@@ -148,7 +184,18 @@ public func iterSseEvents<T: Decodable>(
     bytes: TrustedRouterByteStream,
     type: T.Type
 ) -> AsyncThrowingStream<T, Error> {
-    let cursor = TypedSSECursor<T>(events: SSEParser.stream(from: bytes))
+    makeTypedSSEEvents(bytes: bytes, type: type, recorder: nil)
+}
+
+func makeTypedSSEEvents<T: Decodable>(
+    bytes: TrustedRouterByteStream,
+    type: T.Type,
+    recorder: RequestRecorder?
+) -> AsyncThrowingStream<T, Error> {
+    let cursor = TypedSSECursor<T>(
+        events: SSEParser.stream(from: bytes, recorder: recorder),
+        recorder: recorder
+    )
     return AsyncThrowingStream(unfolding: {
         try await cursor.next()
     })
@@ -159,18 +206,44 @@ public func iterSseEvents<T: Decodable>(
 private final class DictionarySSECursor: @unchecked Sendable {
     private var iterator: AsyncThrowingStream<SSEEvent, Error>.AsyncIterator
     private var finished = false
+    private let recorder: RequestRecorder?
 
-    init(events: AsyncThrowingStream<SSEEvent, Error>) {
+    init(events: AsyncThrowingStream<SSEEvent, Error>, recorder: RequestRecorder? = nil) {
         self.iterator = events.makeAsyncIterator()
+        self.recorder = recorder
+    }
+
+    deinit {
+        if !finished {
+            recorder?.onAborted()
+            recorder?.finish()
+        }
     }
 
     func next() async throws -> [String: Any]? {
+        do {
+            return try await nextValue()
+        } catch is CancellationError {
+            recorder?.onAborted()
+            recorder?.finish()
+            throw CancellationError()
+        } catch {
+            recorder?.onTransportError(
+                error, responseOpened: true, bodyStarted: recorder?.ttftMs != nil
+            )
+            recorder?.finish()
+            throw error
+        }
+    }
+
+    private func nextValue() async throws -> [String: Any]? {
         guard !finished else { return nil }
         while let event = try await iterator.next() {
             try Task.checkCancellation()
             let trimmedData = event.data.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedData == "[DONE]" {
                 finished = true
+                recorder?.finish()
                 return nil
             }
             guard let data = trimmedData.data(using: .utf8) else {
@@ -216,7 +289,17 @@ private final class DictionarySSECursor: @unchecked Sendable {
 public func iterSseEvents(
     bytes: TrustedRouterByteStream
 ) -> AsyncThrowingStream<[String: Any], Error> {
-    let cursor = DictionarySSECursor(events: SSEParser.stream(from: bytes))
+    makeDictionarySSEEvents(bytes: bytes, recorder: nil)
+}
+
+func makeDictionarySSEEvents(
+    bytes: TrustedRouterByteStream,
+    recorder: RequestRecorder?
+) -> AsyncThrowingStream<[String: Any], Error> {
+    let cursor = DictionarySSECursor(
+        events: SSEParser.stream(from: bytes, recorder: recorder),
+        recorder: recorder
+    )
     return AsyncThrowingStream(unfolding: {
         try await cursor.next()
     })

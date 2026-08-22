@@ -35,6 +35,10 @@ public final class TrustedRouter: Sendable {
     /// construction: explicit option > `TRUSTEDROUTER_TELEMETRY` >
     /// `DO_NOT_TRACK` > default on only for known TrustedRouter hosts.
     public let telemetryEnabled: Bool
+    /// Lazily creates the beacon reporter on the first recordable inference
+    /// call. Nil while telemetry is disabled; construction never starts a
+    /// worker or opens a network connection.
+    let telemetryReporterStore: TelemetryReporterStore?
     public let workspaceId: String?
     let regionalEndpointSelector: RegionalEndpointSelector?
     /// The inference hosts used when the regional selector is off: the primary
@@ -90,6 +94,32 @@ public final class TrustedRouter: Sendable {
             environment: ProcessInfo.processInfo.environment
         )
         self.workspaceId = options.workspaceId
+        if self.telemetryEnabled {
+            let controlBaseURL = self.controlBaseURL
+            let apiKey = self.apiKey
+            let workspaceID = self.workspaceId
+            let sampleRate = options.telemetrySampleRate
+            let flushSeconds = options.telemetryFlushSeconds
+            let telemetrySession = options.telemetryURLSession
+            let telemetryClock = options.telemetryClock
+            let telemetryWallClock = options.telemetryWallClock
+            let telemetryRandom = options.telemetryRandom
+            self.telemetryReporterStore = TelemetryReporterStore {
+                TelemetryReporter(
+                    controlBaseURL: controlBaseURL,
+                    apiKey: apiKey,
+                    workspaceID: workspaceID,
+                    successSampleRate: sampleRate,
+                    flushSeconds: flushSeconds,
+                    session: telemetrySession,
+                    clock: telemetryClock ?? { ProcessInfo.processInfo.systemUptime },
+                    wallClock: telemetryWallClock ?? { Date().timeIntervalSince1970 },
+                    random: telemetryRandom ?? { Double.random(in: 0..<1) }
+                )
+            }
+        } else {
+            self.telemetryReporterStore = nil
+        }
         self.aliasBaseURLs = aliasFailoverURLs(
             primaryBaseURL: self.baseUrl,
             // An explicit base URL is a pin: honour it even on the default host.
@@ -111,6 +141,17 @@ public final class TrustedRouter: Sendable {
         } else {
             self.regionalEndpointSelector = nil
         }
+    }
+
+    /// Attempt one final beacon flush and stop the reporter. The call is
+    /// idempotent and always returns within two seconds.
+    public func close() {
+        telemetryReporterStore?.close(timeout: 2)
+    }
+
+    /// Naming alias for server-style lifecycle code.
+    public func shutdown() {
+        close()
     }
 
     /// User-Agent string sent on every request. Includes the SDK version
@@ -344,6 +385,27 @@ public final class TrustedRouter: Sendable {
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference
     ) async throws -> (TrustedRouterByteStream, HTTPURLResponse) {
+        let (bytes, response, recorder) = try await rawStreamRequestWithRecorder(
+            method: method,
+            path: path,
+            headers: headers,
+            body: body,
+            options: options,
+            plane: plane
+        )
+        return (Self.telemetryByteStream(from: bytes, recorder: recorder), response)
+    }
+
+    /// Internal stream-open path used by SSE adapters so TTFT can be marked by
+    /// SSEParser's first decoded event rather than by an arbitrary body byte.
+    func rawStreamRequestWithRecorder(
+        method: String,
+        path: String,
+        headers: [String: String]? = nil,
+        body: Data? = nil,
+        options: PerCallOptions = PerCallOptions(),
+        plane: TrustedRouterRequestPlane = .inference
+    ) async throws -> (TrustedRouterByteStream, HTTPURLResponse, RequestRecorder?) {
         return try await withTransportRetries(
             method: method,
             path: path,
@@ -385,7 +447,7 @@ public final class TrustedRouter: Sendable {
             }
         }
 
-        let (data, response) = try await withTransportRetries(
+        let (data, response, _) = try await withTransportRetries(
             method: method,
             path: path,
             plane: plane,
