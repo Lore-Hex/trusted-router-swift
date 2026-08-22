@@ -101,12 +101,16 @@ final class RetryAndClassificationTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [SequenceProtocol.self]
         SequenceProtocol.reset()
-        let apexRouter = try TrustedRouter(options: .init(
+        var options = TrustedRouterOptions(
             apiKey: "test_key",
             urlSession: URLSession(configuration: config),
             maxRetries: 2,
             telemetry: true
-        ))
+        )
+        let beaconConfig = URLSessionConfiguration.ephemeral
+        beaconConfig.protocolClasses = [RetryBeaconProtocol.self]
+        options.telemetryURLSession = URLSession(configuration: beaconConfig)
+        let apexRouter = try TrustedRouter(options: options)
 
         SequenceProtocol.scripted = [
             (503, #"{"error":{"message":"down"}}"#, nil),
@@ -540,4 +544,23 @@ private final class TransportSequenceProtocol: URLProtocol, @unchecked Sendable 
         }
     }
     override func stopLoading() {}
+}
+
+/// Beacon endpoint fake kept separate from SequenceProtocol so the retry
+/// suite continues to prove the user's transport sees no /client-events call.
+private final class RetryBeaconProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://invalid.local")!,
+            statusCode: 202,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(#"{"policy":{}}"#.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
 }

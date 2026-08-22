@@ -72,7 +72,7 @@ extension TrustedRouter {
         options: PerCallOptions,
         streaming: Bool = false,
         sendAttempt: (URLRequest) async throws -> (Payload, HTTPURLResponse)
-    ) async throws -> (Payload, HTTPURLResponse) {
+    ) async throws -> (Payload, HTTPURLResponse, RequestRecorder?) {
         // High-level billed/mutating endpoints opt in before entering this
         // generic engine. A generic mutation without a caller key stays
         // unkeyed and therefore cannot be replayed after an ambiguous I/O or
@@ -93,9 +93,19 @@ extension TrustedRouter {
         // calls and absolute fetches produce no header and no recorder
         // activity; `rawRequest` never rides this loop and stays untouched
         // as the reserved beacon attach point.
-        let recorder: RequestRecorder? = (telemetryEnabled && inference)
-            ? RequestRecorder(streaming: streaming)
-            : nil
+        let recorder = makeTelemetryRecorder(
+            method: method,
+            path: path,
+            body: body,
+            options: effectiveOptions,
+            streaming: streaming,
+            inference: inference
+        )
+        var streamHandedOff = false
+        defer {
+            if Task.isCancelled { recorder?.onAborted() }
+            if !streaming || !streamHandedOff { recorder?.finish() }
+        }
 
         while true {
             let selectedBaseURL = candidates.isEmpty ? nil : candidates[candidateIndex]
@@ -121,7 +131,11 @@ extension TrustedRouter {
             let mayMoveHost: Bool
             do {
                 let (payload, http) = try await sendAttempt(request)
-                recorder?.onResponse(statusCode: http.statusCode)
+                recorder?.onResponse(
+                    statusCode: http.statusCode,
+                    response: http,
+                    body: payload as? Data
+                )
                 guard replayable,
                       attempt < maxRetries,
                       RetryPolicy.shouldRetry(
@@ -134,12 +148,23 @@ extension TrustedRouter {
                     // (Invariant 9) Exhausted or non-retryable HTTP outcomes
                     // are RETURNED, never thrown: callers keep their divergent
                     // terminal behaviour.
-                    return (payload, http)
+                    let exhausted = attempt > 0 && RetryPolicy.shouldRetry(
+                        statusCode: http.statusCode,
+                        path: path,
+                        plane: plane,
+                        response: http
+                    )
+                    recorder?.markExhausted(exhausted)
+                    streamHandedOff = streaming
+                    return (payload, http, recorder)
                 }
                 retryAfterSeconds = RetryPolicy.parseRetryAfter(http)
                 // (Invariants 2, 8) An HTTP move additionally requires a
                 // failoverable status: 500 and 429 retry in place.
                 mayMoveHost = RetryPolicy.isFailoverableStatus(http.statusCode, http)
+            } catch is CancellationError {
+                recorder?.onAborted()
+                throw CancellationError()
             } catch let err as TrustedRouterError {
                 // Pre-flight failures (invalid URL, non-HTTP response) are
                 // never retried.
@@ -154,6 +179,7 @@ extension TrustedRouter {
                       attempt < maxRetries,
                       RetryPolicy.shouldRetryTransportError(path: path, plane: plane)
                 else {
+                    recorder?.markExhausted(attempt > 0)
                     throw TrustedRouterError.internalError(error.localizedDescription)
                 }
                 retryAfterSeconds = nil
@@ -175,6 +201,39 @@ extension TrustedRouter {
             ))
             attempt += 1
         }
+    }
+
+
+    private func makeTelemetryRecorder(
+        method: String,
+        path: String,
+        body: Data?,
+        options: PerCallOptions,
+        streaming: Bool,
+        inference: Bool
+    ) -> RequestRecorder? {
+        let upperMethod = method.uppercased()
+        guard telemetryEnabled, inference, ["GET", "POST"].contains(upperMethod),
+              let reporter = telemetryReporterStore?.reporter() else { return nil }
+        var model: String?
+        var providerPinned = false
+        if let body,
+           let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] {
+            model = root["model"] as? String
+            if let provider = root["provider"] as? [String: Any] {
+                providerPinned = provider["allow_fallbacks"] as? Bool == false
+            }
+        }
+        return RequestRecorder(
+            streaming: streaming,
+            reporter: reporter,
+            endpoint: ClientTelemetry.endpointEnum(path),
+            method: upperMethod,
+            providerPinned: providerPinned,
+            model: model,
+            configuredTimeout: options.timeout,
+            now: { reporter.monotonicNow() }
+        )
     }
 
     /// Per-attempt request assembly (L4): URL, method, body, timeout shaping,

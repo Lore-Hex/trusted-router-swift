@@ -91,6 +91,10 @@ public struct TrustedRouterOptions {
     /// known TrustedRouter inference and control hosts. Custom base URLs
     /// never send the header regardless of this setting.
     public var telemetry: Bool?
+    /// Sampling rate for otherwise healthy, single-attempt requests in the
+    /// client-events beacon. Failures, retried/failover requests, and calls
+    /// slower than 30 seconds are always sampled. Values are clamped to 0...1.
+    public var telemetrySampleRate: Double
     /// Nil enables affinity for URLSession.shared and disables it for an
     /// injected session. Set explicitly to override that safe default.
     public var regionalAffinity: Bool?
@@ -106,6 +110,7 @@ public struct TrustedRouterOptions {
         maxRetries: Int = 2,
         regionalFailover: Bool = true,
         telemetry: Bool? = nil,
+        telemetrySampleRate: Double = 0.01,
         regionalAffinity: Bool? = nil,
         regionProbeTimeout: TimeInterval = TrustedRouterConstants.defaultRegionProbeTimeout
     ) {
@@ -118,9 +123,19 @@ public struct TrustedRouterOptions {
         self.maxRetries = maxRetries
         self.regionalFailover = regionalFailover
         self.telemetry = telemetry
+        self.telemetrySampleRate = telemetrySampleRate
         self.regionalAffinity = regionalAffinity
         self.regionProbeTimeout = regionProbeTimeout
     }
+
+    // Deterministic beacon seams used only by @testable contract tests. The
+    // production path leaves these nil and TelemetryReporter creates its own
+    // ephemeral URLSession and clocks.
+    var telemetryURLSession: URLSession? = nil
+    var telemetryClock: (@Sendable () -> Double)? = nil
+    var telemetryWallClock: (@Sendable () -> Double)? = nil
+    var telemetryRandom: (@Sendable () -> Double)? = nil
+    var telemetryFlushSeconds: Double = ClientTelemetry.telemetryFlushSeconds
 }
 
 /// Per-call overrides on top of a `TrustedRouter` client's defaults. Useful

@@ -85,7 +85,7 @@ extension TrustedRouter {
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         let effectiveOptions = automaticIdempotencyOptions(options)
-        let (bytes, response) = try await rawStreamRequest(
+        let (bytes, response, recorder) = try await rawStreamRequestWithRecorder(
             method: "POST",
             path: "/chat/completions",
             headers: ["accept": "text/event-stream"],
@@ -96,10 +96,16 @@ extension TrustedRouter {
         if !(200..<300).contains(response.statusCode) {
             // Drain the body before throwing so callers see the server's
             // actual error message instead of a bare status code.
-            throw try await streamingError(bytes: bytes, response: response)
+            let result = try await streamingError(
+                bytes: bytes, response: response, recorder: recorder
+            )
+            recorder?.finish()
+            throw result
         }
 
-        return iterSseEvents(bytes: bytes, type: ChatCompletionChunk.self)
+        return makeTypedSSEEvents(
+            bytes: bytes, type: ChatCompletionChunk.self, recorder: recorder
+        )
     }
 
     /// `[ChatMessage]` overload — encodes the typed messages to the dict

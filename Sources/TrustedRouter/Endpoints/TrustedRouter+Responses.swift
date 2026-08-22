@@ -91,7 +91,7 @@ extension TrustedRouter {
 
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         let effectiveOptions = automaticIdempotencyOptions(options)
-        let (bytes, response) = try await rawStreamRequest(
+        let (bytes, response, recorder) = try await rawStreamRequestWithRecorder(
             method: "POST",
             path: "/responses",
             headers: ["accept": "text/event-stream"],
@@ -100,10 +100,14 @@ extension TrustedRouter {
         )
 
         if !(200..<300).contains(response.statusCode) {
-            throw try await streamingError(bytes: bytes, response: response)
+            let result = try await streamingError(
+                bytes: bytes, response: response, recorder: recorder
+            )
+            recorder?.finish()
+            throw result
         }
 
-        return iterSseEvents(bytes: bytes)
+        return makeDictionarySSEEvents(bytes: bytes, recorder: recorder)
     }
 
     public func responsesInputTokens(

@@ -10,15 +10,14 @@ import Glibc
 import Musl
 #endif
 
-// L7 data + L1 policy — client-observed reliability telemetry, HEADER CHANNEL
-// only. Implements contract v1 of docs/client-telemetry.md
+// L7 data + L1 policy — client-observed reliability telemetry contract v1.
+// This file owns the header channel and request recorder; BeaconReporter.swift
+// owns the bounded out-of-engine client-events delivery channel.
 // (Lore-Hex/quill-router): the per-attempt `x-tr-client` header (§3.2), the
 // closed host/endpoint/outcome/error-class vocabularies (§5.2), transport
-// error classification, and the enable/disable precedence (§6.3). The beacon
-// channel (§4/§5) is deliberately NOT here — §9 step 7 and §10 defer beacons
-// in non-Python SDKs until the Python contract has been live and calibrated.
-// `rawRequest` is the out-of-engine single-shot precedent reserved as the
-// beacon sender's attach point (§6.1) and is untouched by this file.
+// error classification, and the enable/disable precedence (§6.3).
+// `rawRequest` remains the out-of-engine single-shot precedent: beacon sends
+// use the same one-attempt shape on their own URLSession, never the engine.
 //
 // PRINCIPLES (§2, non-negotiable):
 //  - Content-free by construction: every emitted value is a closed enum or a
@@ -374,7 +373,7 @@ enum ClientTelemetry {
 /// begin_attempt / on_response / on_transport_error / on_moved /
 /// header_value flow. Created once per `withTransportRetries` call and
 /// touched only by that task; no locking needed.
-final class RequestRecorder {
+final class RequestRecorder: @unchecked Sendable {
 
     struct Attempt {
         var index: Int
@@ -382,7 +381,12 @@ final class RequestRecorder {
         var outcome: String
         var httpStatus: Int?
         var errorClass: String?
+        var errorSource: String?
+        var shouldRetry: Bool?
+        var retryAfterMs: Int?
         var elapsedMs: Int
+        var ttfbMs: Int?
+        var requestID: String?
         var moved: Bool
     }
 
@@ -400,20 +404,42 @@ final class RequestRecorder {
 
     let streaming: Bool
     private let now: () -> Double
+    private let reporter: TelemetryReporter?
+    private let endpoint: String
+    private let method: String
+    private let providerPinned: Bool
+    private let model: String?
+    private let configuredTimeout: Double?
     private(set) var attempts: [Attempt] = []
     private(set) var failoverUsed = false
+    private(set) var ttftMs: Int?
+    private var attemptPhases: [String] = []
     private var firstStarted: Double?
     private var attemptStarted: Double?
     private var currentHost: String?
     private var currentIndex: Int?
+    private var finished = false
+    private var exhaustedHint = false
 
     /// `now` is a monotonic seconds clock, injectable for deterministic
     /// tests (mirroring py's use of `time.perf_counter`).
     init(
         streaming: Bool,
+        reporter: TelemetryReporter? = nil,
+        endpoint: String = "inference_other",
+        method: String = "POST",
+        providerPinned: Bool = false,
+        model: String? = nil,
+        configuredTimeout: Double? = nil,
         now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }
     ) {
         self.streaming = streaming
+        self.reporter = reporter
+        self.endpoint = ClientTelemetry.endpoints.contains(endpoint) ? endpoint : "inference_other"
+        self.method = method.uppercased()
+        self.providerPinned = providerPinned
+        self.model = ClientTelemetry.validModel(model)
+        self.configuredTimeout = configuredTimeout
         self.now = now
     }
 
@@ -452,7 +478,7 @@ final class RequestRecorder {
                 ? previous.outcome
                 : "none"
             pairs.append(("po", previousOutcome))
-            pairs.append(("pc", previous.errorClass ?? "none"))
+            pairs.append(("pc", previousOutcome == "none" ? "none" : previous.errorClass ?? "none"))
             pairs.append(("ph", previous.host))
             pairs.append(("pm", String(previous.elapsedMs)))
             pairs.append(("sm", String(sinceFirstMs)))
@@ -466,16 +492,54 @@ final class RequestRecorder {
 
     /// Record an attempt that produced an HTTP response (any status).
     func onResponse(statusCode: Int) {
+        onResponse(statusCode: statusCode, response: nil, body: nil)
+    }
+
+    /// Record response headers at TTFB. The body is inspected only for the
+    /// closed error-source enum; no response text is retained.
+    func onResponse(statusCode: Int, response: HTTPURLResponse?, body: Data?) {
         guard let started = attemptStarted, let host = currentHost else { return }
+        let elapsed = ClientTelemetry.clampedMilliseconds(now() - started)
+        let verdict = response.flatMap(RetryPolicy.shouldRetryVerdict)
+        let retryAfterMs: Int?
+        if let seconds = response.flatMap(RetryPolicy.parseRetryAfter) {
+            retryAfterMs = ClientTelemetry.boundedMilliseconds(seconds)
+        } else {
+            retryAfterMs = nil
+        }
+        let requestID = response.flatMap { RetryPolicy.header($0, "x-request-id") }
+        let errorSource = body.flatMap(Self.errorSource)
         store(Attempt(
             index: currentIndex ?? attempts.count,
             host: host,
             outcome: statusCode < 400 ? "ok" : "http_error",
             httpStatus: statusCode,
             errorClass: nil,
-            elapsedMs: ClientTelemetry.clampedMilliseconds(now() - started),
+            errorSource: errorSource,
+            shouldRetry: verdict,
+            retryAfterMs: retryAfterMs,
+            elapsedMs: elapsed,
+            ttfbMs: elapsed,
+            requestID: ClientTelemetry.validRequestID(requestID),
             moved: false
-        ))
+        ), phase: "none")
+    }
+
+    /// Attach the closed error-source enum after a streaming diagnostic body
+    /// has been drained. No body text is retained.
+    func onErrorBody(_ body: Data) {
+        guard !finished, !attempts.isEmpty, let source = Self.errorSource(body) else { return }
+        attempts[attempts.count - 1].errorSource = source
+    }
+
+    private static func errorSource(_ body: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return nil
+        }
+        let direct = root["source"] as? String
+        let nested = (root["error"] as? [String: Any])?["source"] as? String
+        let candidate = direct ?? nested
+        return ["router", "provider", "unknown"].contains(candidate ?? "") ? candidate : nil
     }
 
     /// Record an attempt that threw before a usable response. Must be called
@@ -486,29 +550,45 @@ final class RequestRecorder {
         responseOpened: Bool = false,
         bodyStarted: Bool = false
     ) {
+        guard !finished else { return }
         guard let started = attemptStarted, let host = currentHost else { return }
         var errorClass = ClientTelemetry.classifyTransportError(
             error,
             responseOpened: responseOpened
         )
         let outcome: String
+        var phase = "none"
         if ClientTelemetry.isTimeoutError(error) {
             outcome = "timeout"
-            if bodyStarted { errorClass = "stream_stalled" }
+            if bodyStarted {
+                errorClass = "stream_stalled"
+                phase = "idle"
+            } else if responseOpened {
+                phase = "first_byte"
+            } else {
+                phase = "connect"
+            }
         } else if bodyStarted {
             outcome = "stream_broken"
         } else {
             outcome = "transport_error"
         }
+        let index = currentIndex ?? attempts.count
+        let previous = index < attempts.count ? attempts[index] : nil
         store(Attempt(
-            index: currentIndex ?? attempts.count,
+            index: index,
             host: host,
             outcome: outcome,
-            httpStatus: nil,
+            httpStatus: responseOpened ? previous?.httpStatus : nil,
             errorClass: errorClass,
+            errorSource: previous?.errorSource,
+            shouldRetry: previous?.shouldRetry,
+            retryAfterMs: previous?.retryAfterMs,
             elapsedMs: ClientTelemetry.clampedMilliseconds(now() - started),
+            ttfbMs: responseOpened ? previous?.ttfbMs : nil,
+            requestID: previous?.requestID,
             moved: false
-        ))
+        ), phase: phase)
     }
 
     /// Record that the candidate index advanced after the current attempt —
@@ -519,11 +599,126 @@ final class RequestRecorder {
         failoverUsed = true
     }
 
-    private func store(_ attempt: Attempt) {
+    /// Called by SSEParser exactly when it produces its first parsed event.
+    func onFirstEvent() {
+        guard !finished else { return }
+        guard ttftMs == nil, let firstStarted else { return }
+        ttftMs = ClientTelemetry.clampedMilliseconds(now() - firstStarted)
+    }
+
+    func onAborted() {
+        guard !finished else { return }
+        guard let started = attemptStarted, let host = currentHost else { return }
+        let index = currentIndex ?? attempts.count
+        let previous = index < attempts.count ? attempts[index] : nil
+        store(Attempt(
+            index: index,
+            host: host,
+            outcome: "aborted",
+            httpStatus: previous?.httpStatus,
+            errorClass: previous?.errorClass,
+            errorSource: previous?.errorSource,
+            shouldRetry: previous?.shouldRetry,
+            retryAfterMs: previous?.retryAfterMs,
+            elapsedMs: ClientTelemetry.clampedMilliseconds(now() - started),
+            ttfbMs: previous?.ttfbMs,
+            requestID: previous?.requestID,
+            moved: previous?.moved ?? false
+        ), phase: previous.flatMap { _ in index < attemptPhases.count ? attemptPhases[index] : nil } ?? "none")
+    }
+
+    private func configuredTimeoutMs(for phase: String) -> Int? {
+        guard ["connect", "first_byte", "idle"].contains(phase),
+              let configuredTimeout, configuredTimeout.isFinite, configuredTimeout > 0 else {
+            return nil
+        }
+        return ClientTelemetry.boundedMilliseconds(configuredTimeout, minimum: 1)
+    }
+
+    /// Derive the one request event plus exact request/attempt counter rows.
+    /// Idempotent and non-throwing; sampling is owned by TelemetryReporter.
+    func finish(exhausted: Bool) {
+        guard !finished else { return }
+        finished = true
+        guard ["GET", "POST"].contains(method), let reporter,
+              !attempts.isEmpty, let firstStarted else { return }
+        let final = attempts[attempts.count - 1]
+        let finalOutcome = exhausted && attempts.count > 1 && final.outcome != "ok"
+            ? "exhausted" : final.outcome
+        let phase = attemptPhases.last ?? "none"
+        let configuredMs = configuredTimeoutMs(for: phase)
+        let totalMs = ClientTelemetry.clampedMilliseconds(now() - firstStarted)
+        let wireAttempts = attempts.map {
+            TelemetryAttemptRecord(
+                index: $0.index, host: $0.host, outcome: $0.outcome,
+                httpStatus: $0.httpStatus, errorClass: $0.errorClass,
+                errorSource: $0.errorSource, shouldRetry: $0.shouldRetry,
+                retryAfterMs: $0.retryAfterMs, elapsedMs: $0.elapsedMs,
+                ttfbMs: $0.ttfbMs, requestID: $0.requestID, moved: $0.moved
+            )
+        }
+        let event = TelemetryRequestEvent(
+            endpoint: endpoint, method: method, streaming: streaming,
+            providerPinned: providerPinned, model: model, attempts: wireAttempts,
+            finalOutcome: finalOutcome, finalHTTPStatus: final.httpStatus,
+            totalMs: totalMs, ttftMs: ttftMs, failoverUsed: failoverUsed,
+            timeoutPhase: phase, configuredTimeoutMs: configuredMs,
+            completedAt: now()
+        )
+        let counterOutcome = finalOutcome == "exhausted" ? final.outcome : finalOutcome
+        let firstErrorClass = attempts.compactMap(\.errorClass).first
+        let requestKey = TelemetryCounterKey(
+            level: "request", endpoint: endpoint, streaming: streaming,
+            host: final.host, outcome: counterOutcome, errorClass: firstErrorClass,
+            httpStatusClass: ClientTelemetry.statusClass(final.httpStatus),
+            timeoutPhase: phase,
+            timeoutFloorMet: ClientTelemetry.timeoutFloorMet(phase, configuredMs: configuredMs),
+            providerPinned: providerPinned
+        )
+        var requestIncrement = TelemetryCounterIncrement(
+            requests: 1, attempts: attempts.count,
+            failoverUsed: failoverUsed ? 1 : 0,
+            firstAttemptSuccess: attempts.first?.outcome == "ok" ? 1 : 0,
+            totalMsHistogram: [ClientTelemetry.latencyBucket(totalMs): 1]
+        )
+        if let firstEvent = ttftMs ?? final.ttfbMs {
+            requestIncrement.firstEventMsHistogram = [ClientTelemetry.latencyBucket(firstEvent): 1]
+        }
+        var counters: [(TelemetryCounterKey, TelemetryCounterIncrement)] = [(requestKey, requestIncrement)]
+        for (index, attempt) in attempts.enumerated() {
+            let attemptPhase = index < attemptPhases.count ? attemptPhases[index] : "none"
+            let attemptTimeout = configuredTimeoutMs(for: attemptPhase)
+            let key = TelemetryCounterKey(
+                level: "attempt", endpoint: endpoint, streaming: streaming,
+                host: attempt.host, outcome: attempt.outcome, errorClass: attempt.errorClass,
+                httpStatusClass: ClientTelemetry.statusClass(attempt.httpStatus),
+                timeoutPhase: attemptPhase,
+                timeoutFloorMet: ClientTelemetry.timeoutFloorMet(attemptPhase, configuredMs: attemptTimeout),
+                providerPinned: providerPinned
+            )
+            counters.append((key, TelemetryCounterIncrement(
+                requests: 1, attempts: 1, failoverUsed: attempt.moved ? 1 : 0,
+                firstAttemptSuccess: 0
+            )))
+        }
+        reporter.record(event: event, counters: counters)
+    }
+
+    func markExhausted(_ value: Bool) {
+        exhaustedHint = exhaustedHint || value
+    }
+
+    func finish() {
+        finish(exhausted: exhaustedHint)
+    }
+
+    private func store(_ attempt: Attempt, phase: String = "none") {
         if attempt.index < attempts.count {
             attempts[attempt.index] = attempt
+            if attempt.index < attemptPhases.count { attemptPhases[attempt.index] = phase }
         } else {
             attempts.append(attempt)
+            attemptPhases.append(ClientTelemetry.timeoutPhases.contains(phase) ? phase : "none")
         }
     }
 }

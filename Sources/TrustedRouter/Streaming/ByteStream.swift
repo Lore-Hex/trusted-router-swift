@@ -12,6 +12,46 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
+    /// Lifecycle wrapper for callers of the low-level raw stream API. It
+    /// records completion, cancellation and mid-body transport failure, but
+    /// deliberately leaves TTFT nil: only SSEParser may mark a first event.
+    static func telemetryByteStream(
+        from bytes: TrustedRouterByteStream,
+        recorder: RequestRecorder?
+    ) -> TrustedRouterByteStream {
+        guard let recorder else { return bytes }
+        final class Cursor: @unchecked Sendable {
+            var iterator: TrustedRouterByteStream.AsyncIterator
+            let recorder: RequestRecorder
+            var bodyStarted = false
+            init(_ bytes: TrustedRouterByteStream, recorder: RequestRecorder) {
+                iterator = bytes.makeAsyncIterator()
+                self.recorder = recorder
+            }
+            func next() async throws -> UInt8? {
+                do {
+                    try Task.checkCancellation()
+                    let value = try await iterator.next()
+                    if value == nil { recorder.finish() }
+                    else { bodyStarted = true }
+                    return value
+                } catch is CancellationError {
+                    recorder.onAborted()
+                    recorder.finish()
+                    throw CancellationError()
+                } catch {
+                    recorder.onTransportError(
+                        error, responseOpened: true, bodyStarted: bodyStarted
+                    )
+                    recorder.finish()
+                    throw error
+                }
+            }
+        }
+        let cursor = Cursor(bytes, recorder: recorder)
+        return TrustedRouterByteStream(unfolding: { try await cursor.next() })
+    }
+
     /// Replay a fully-buffered body as a pull byte stream. This is the ONLY
     /// transport shape on Linux: FoundationNetworking has no `AsyncBytes`,
     /// so Linux waits for `data(for:)` to finish and then exposes one buffered
@@ -73,7 +113,8 @@ extension TrustedRouter {
     @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
     func streamingError(
         bytes: TrustedRouterByteStream,
-        response: HTTPURLResponse
+        response: HTTPURLResponse,
+        recorder: RequestRecorder? = nil
     ) async throws -> TrustedRouterError {
         var collected = Data()
         do {
@@ -84,6 +125,7 @@ extension TrustedRouter {
         } catch {
             // Body drained as much as we could; classify with what we got.
         }
+        recorder?.onErrorBody(collected)
         return classifyErrorPublic(statusCode: response.statusCode, data: collected, response: response)
     }
 }
