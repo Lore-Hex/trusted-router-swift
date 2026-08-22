@@ -144,7 +144,9 @@ public final class TrustedRouter: Sendable {
     }
 
     /// Attempt one final beacon flush and stop the reporter. The call is
-    /// idempotent and always returns within two seconds.
+    /// idempotent and always returns within two seconds. Because this is a
+    /// synchronous API, async callers running on a cooperative executor should
+    /// use `await shutdown()` instead.
     public func close() {
         telemetryReporterStore?.close(timeout: 2)
     }
@@ -152,6 +154,13 @@ public final class TrustedRouter: Sendable {
     /// Naming alias for server-style lifecycle code.
     public func shutdown() {
         close()
+    }
+
+    /// Asynchronously attempt one final beacon flush and stop the reporter.
+    /// Prefer this overload from Swift-concurrency tasks so no executor thread
+    /// is synchronously occupied while the request is in flight.
+    public func shutdown() async {
+        await telemetryReporterStore?.shutdown(timeout: 2)
     }
 
     /// User-Agent string sent on every request. Includes the SDK version

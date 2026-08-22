@@ -66,7 +66,8 @@ single-shot `URLSession`; it never uses an injected session or the inference
 retry/failover engine. Set `telemetrySampleRate` to tune otherwise healthy
 single-attempt sampling (failures, retries/failover, and calls over 30 seconds
 remain at 100%). Call `close()` or `shutdown()` for a final flush bounded to two
-seconds.
+seconds. From an async task, prefer `await shutdown()` so the cooperative
+executor thread is not occupied by the synchronous bounded wait.
 
 Set `telemetry: false`, `TRUSTEDROUTER_TELEMETRY=0`, or `DO_NOT_TRACK=1` to
 disable both channels. `TRUSTEDROUTER_TELEMETRY_DEBUG=1` echoes each

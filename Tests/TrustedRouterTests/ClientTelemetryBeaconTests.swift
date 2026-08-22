@@ -76,7 +76,7 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         XCTAssertEqual((events[0]["attempts"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual(counters.filter { $0["level"] as? String == "request" }.count, 1)
         XCTAssertEqual(counters.filter { $0["level"] as? String == "attempt" }.count, 2)
-        router.close()
+        await router.shutdown()
     }
 
     func testSamplingAndBoundedDropsAreDeterministic() {
@@ -273,6 +273,40 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 0.5)
     }
 
+    func testWorkerCadenceUrgentWakeAndAsyncShutdown() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BeaconEndpointProtocol.self]
+
+        let cadence = TelemetryReporter(
+            controlBaseURL: TrustedRouterConstants.defaultControlBaseURL,
+            apiKey: "sk-test", workspaceID: nil, successSampleRate: 1,
+            flushSeconds: 0.2, session: URLSession(configuration: config)
+        )
+        XCTAssertFalse(cadence.workerStarted, "construction remains lazy")
+        BeaconEndpointProtocol.script = [.init(status: 202)]
+        cadence.record(event: event(outcome: "http_error"), counters: [])
+        XCTAssertTrue(cadence.workerStarted)
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(BeaconEndpointProtocol.requestCount(), 0, "cadence should not flush early")
+        let cadenceFlushed = await waitForBeaconRequests(1)
+        XCTAssertTrue(cadenceFlushed, "cadence flush should run asynchronously")
+        await cadence.shutdown(timeout: 0)
+
+        BeaconEndpointProtocol.reset()
+        let urgent = TelemetryReporter(
+            controlBaseURL: TrustedRouterConstants.defaultControlBaseURL,
+            apiKey: "sk-test", workspaceID: nil, successSampleRate: 1,
+            flushSeconds: 600, session: URLSession(configuration: config)
+        )
+        BeaconEndpointProtocol.script = [.init(status: 202)]
+        for _ in 0..<50 {
+            urgent.record(event: event(outcome: "http_error"), counters: [])
+        }
+        let urgentFlushed = await waitForBeaconRequests(1)
+        XCTAssertTrue(urgentFlushed, "50 events should wake the sleeping worker")
+        await urgent.shutdown(timeout: 0)
+    }
+
     // MARK: fixtures
 
     private func makeRouter(
@@ -367,6 +401,15 @@ final class ClientTelemetryBeaconTests: XCTestCase {
             ? BeaconEndpointProtocol.bodies[index] : nil)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
+
+    private func waitForBeaconRequests(_ count: Int) async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if BeaconEndpointProtocol.requestCount() >= count { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return BeaconEndpointProtocol.requestCount() >= count
+    }
 }
 
 private final class BeaconClock: @unchecked Sendable {
@@ -385,18 +428,32 @@ private struct BeaconResponse {
 }
 
 private final class BeaconEndpointProtocol: URLProtocol, @unchecked Sendable {
+    private static let stateLock = NSLock()
     nonisolated(unsafe) static var script: [BeaconResponse] = []
     nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var bodies: [Data] = []
 
-    static func reset() { script = []; requests = []; bodies = [] }
+    static func reset() {
+        stateLock.lock()
+        script = []
+        requests = []
+        bodies = []
+        stateLock.unlock()
+    }
+    static func requestCount() -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return requests.count
+    }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
     override func startLoading() {
+        Self.stateLock.lock()
         Self.requests.append(request)
         Self.bodies.append(Self.readBody(request))
         let item = Self.script.isEmpty ? BeaconResponse(status: 202) : Self.script.removeFirst()
+        Self.stateLock.unlock()
         let respond = { [self] in
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: item.status,

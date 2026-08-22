@@ -270,9 +270,116 @@ private actor TelemetryFlushGate {
     }
 }
 
+/// A single-consumer, coalescing wake-up primitive. Waiting is implemented by
+/// a sleeping Swift task and a checked continuation, so it never parks a
+/// cooperative-pool thread.
+private final class TelemetryWorkerWake: @unchecked Sendable {
+    private struct Waiter {
+        let id: UInt64
+        let continuation: CheckedContinuation<Void, Never>
+        var timeout: Task<Void, Never>?
+    }
+
+    private let lock = NSLock()
+    private var waiter: Waiter?
+    private var nextID: UInt64 = 0
+    private var pending = false
+    private var finished = false
+
+    func wait(seconds: Double) async {
+        let nanoseconds = Self.nanoseconds(seconds)
+        guard nanoseconds > 0 else { return }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                register(continuation, nanoseconds: nanoseconds)
+            }
+        } onCancel: {
+            signal()
+        }
+    }
+
+    func signal() {
+        let released = lock.withLock { () -> Waiter? in
+            guard !finished else { return nil }
+            guard let waiter else {
+                pending = true
+                return nil
+            }
+            self.waiter = nil
+            return waiter
+        }
+        released?.timeout?.cancel()
+        released?.continuation.resume()
+    }
+
+    func finish() {
+        let released = lock.withLock { () -> Waiter? in
+            guard !finished else { return nil }
+            finished = true
+            pending = false
+            defer { waiter = nil }
+            return waiter
+        }
+        released?.timeout?.cancel()
+        released?.continuation.resume()
+    }
+
+    private func register(
+        _ continuation: CheckedContinuation<Void, Never>,
+        nanoseconds: UInt64
+    ) {
+        var id: UInt64?
+        let resumeImmediately = lock.withLock { () -> Bool in
+            if finished || pending {
+                pending = false
+                return true
+            }
+            let candidate = nextID
+            nextID = nextID == UInt64.max ? 0 : nextID + 1
+            waiter = Waiter(id: candidate, continuation: continuation, timeout: nil)
+            id = candidate
+            return false
+        }
+        guard !resumeImmediately, let id else {
+            continuation.resume()
+            return
+        }
+
+        let timeout = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            self?.timeoutFired(id: id)
+        }
+        let installed = lock.withLock { () -> Bool in
+            guard waiter?.id == id else { return false }
+            waiter?.timeout = timeout
+            return true
+        }
+        if !installed { timeout.cancel() }
+    }
+
+    private func timeoutFired(id: UInt64) {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            guard waiter?.id == id else { return nil }
+            defer { waiter = nil }
+            return waiter?.continuation
+        }
+        continuation?.resume()
+    }
+
+    private static func nanoseconds(_ seconds: Double) -> UInt64 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        let bounded = min(ClientTelemetry.telemetryBackoffMaxSeconds, seconds)
+        return UInt64(bounded * 1_000_000_000)
+    }
+}
+
 final class TelemetryReporter: @unchecked Sendable {
     private let lock = NSLock()
-    private let wake = DispatchSemaphore(value: 0)
+    private let wake = TelemetryWorkerWake()
     private let flushGate = TelemetryFlushGate()
     private let controlBaseURL: String
     private let apiKey: String?
@@ -404,13 +511,13 @@ final class TelemetryReporter: @unchecked Sendable {
     private func startWorker(_ now: Double) {
         guard worker == nil, !disabled, !closed else { return }
         nextFlushAt = now + flushSeconds
-        let semaphore = wake
-        worker = Task.detached(priority: .utility) { [self, semaphore] in
+        let wake = wake
+        worker = Task.detached(priority: .utility) { [self, wake] in
             while true {
                 let state = workerState()
                 if state.0 { return }
                 if state.1 > 0 {
-                    Self.waitForWake(semaphore, seconds: state.1)
+                    await wake.wait(seconds: state.1)
                     continue
                 }
                 _ = await flushNow()
@@ -440,12 +547,9 @@ final class TelemetryReporter: @unchecked Sendable {
         }
     }
 
-    private static func waitForWake(_ semaphore: DispatchSemaphore, seconds: Double) {
-        _ = semaphore.wait(timeout: .now() + seconds)
-    }
-
     deinit {
-        wake.signal()
+        worker?.cancel()
+        wake.finish()
         session.invalidateAndCancel()
     }
 
@@ -871,15 +975,19 @@ final class TelemetryReporter: @unchecked Sendable {
         closedWindows = []
         retainedWindowBytes = 0
         droppedSinceLast = 0
-        wake.signal()
+        worker?.cancel()
+        wake.finish()
     }
 
+    /// Synchronously waits for the bounded final flush. Async callers running
+    /// on a cooperative executor should use `shutdown(timeout:)` instead.
     func close(timeout: Double = 2.0) {
         let bounded = timeout.isFinite ? min(2, max(0, timeout)) : 0
         let shouldClose = lock.withLock { () -> Bool in
             if closed { return false }
             closed = true
-            wake.signal()
+            worker?.cancel()
+            wake.finish()
             return true
         }
         guard shouldClose else { return }
@@ -890,6 +998,25 @@ final class TelemetryReporter: @unchecked Sendable {
             done.signal()
         }
         _ = done.wait(timeout: .now() + bounded)
+    }
+
+    func shutdown(timeout: Double = 2.0) async {
+        let bounded = timeout.isFinite ? min(2, max(0, timeout)) : 0
+        let shouldClose = lock.withLock { () -> Bool in
+            if closed { return false }
+            closed = true
+            worker?.cancel()
+            wake.finish()
+            return true
+        }
+        guard shouldClose, bounded > 0 else { return }
+        let done = TelemetryWorkerWake()
+        let finalFlush = Task.detached(priority: .utility) { [self, done] in
+            _ = await flushGate.flush(self, force: true, timeout: bounded)
+            done.finish()
+        }
+        await done.wait(seconds: bounded)
+        finalFlush.cancel()
     }
 
     // Internal observations used by deterministic contract tests.
@@ -954,6 +1081,9 @@ final class TelemetryReporterStore: @unchecked Sendable {
 
     func existing() -> TelemetryReporter? { lock.withLock { value } }
     func close(timeout: Double = 2) { existing()?.close(timeout: timeout) }
+    func shutdown(timeout: Double = 2) async {
+        await existing()?.shutdown(timeout: timeout)
+    }
 }
 
 private extension NSLock {
