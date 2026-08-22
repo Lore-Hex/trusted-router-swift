@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.0 — 2026-08-22
+
+- Added the `/v1/client-events` beacon channel (client telemetry contract v1
+  §4, §5, §6.2–§6.4), completing the telemetry work begun in 0.7.0. A beacon
+  reporter batches sampled request events and exact per-minute counters and
+  posts them on its own `URLSession` — never the caller's and never the
+  inference transport. Buffers are bounded and drop the oldest success first;
+  counter keys fold (error class, then endpoint, then an existing key) rather
+  than growing without limit; batches are trimmed to the byte cap. The
+  server's response governs the client: a volume-reducing policy is honoured,
+  400/401/403/404/410 disables the reporter for the process, 413 drops the
+  batch, and backoff runs 60s to 10min honouring `Retry-After`. New
+  sample-rate option (default 0.01) and a bounded final flush on shutdown.
+  The reporter's worker waits on a cancellable continuation rather than
+  parking a cooperative thread.
+- The opt-out precedence from 0.7.0 governs both channels unchanged, prompt
+  and completion content is never recorded, and telemetry can never fail a
+  request.
+
 All notable changes to this SDK are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [Semantic Versioning](https://semver.org/).

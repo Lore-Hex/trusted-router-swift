@@ -8,7 +8,7 @@ import FoundationNetworking
 
 /// Compile-time constants for the SDK: version, default endpoints, and models.
 public enum TrustedRouterConstants {
-    public static let version = "0.7.0"
+    public static let version = "0.8.0"
     public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
     public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
     public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
