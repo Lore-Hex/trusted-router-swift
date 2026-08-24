@@ -945,7 +945,7 @@ final class TelemetryReporter: @unchecked Sendable {
             ? TrustedRouterConstants.version : "0.0.0"
         return [
             "name": "tr-swift", "version": version, "lang": "swift",
-            "runtime": "swift/5.9.0", "os": os, "arch": arch
+            "runtime": TrustedRouterConstants.runtime, "os": os, "arch": arch
         ]
     }
 

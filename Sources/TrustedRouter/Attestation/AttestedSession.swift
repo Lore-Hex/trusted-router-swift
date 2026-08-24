@@ -127,7 +127,7 @@ fileprivate actor AttestedHTTP1Reader {
         let request = [
             "GET \(path) HTTP/1.1",
             "Host: \(hostHeader)",
-            "User-Agent: trusted-router-swift/\(TrustedRouterConstants.version)",
+            "User-Agent: \(TrustedRouter.userAgent)",
             "Accept: application/jwt, application/json, */*",
             "Connection: keep-alive",
             "",

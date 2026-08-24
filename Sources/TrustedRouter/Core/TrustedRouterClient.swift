@@ -163,30 +163,20 @@ public final class TrustedRouter: Sendable {
         await telemetryReporterStore?.shutdown(timeout: 2)
     }
 
-    /// User-Agent string sent on every request. Includes the SDK version
-    /// and the host OS/version so server-side logs can correlate by client.
+    /// User-Agent string built by the SDK. Its runtime and the beacon identity
+    /// come from one constant, so the SDK cannot report two different
+    /// runtimes. A caller may override the inference User-Agent through client
+    /// or per-call headers; the server then attributes that request by the
+    /// caller's string (`client_sdk`/`client_runtime` reflect the override),
+    /// while the beacon POST and identity report the SDK's true runtime.
     ///
     /// The shape is pinned by the client-telemetry contract (§3.1): the
     /// enclave parses `trusted-router-swift/SEMVER( runtime/ver)?` with the
-    /// runtime token matching `[a-z]{1,10}/[0-9A-Za-z.+-]{1,24}`. The old
-    /// parenthesised `(macOS 14.6)` suffix fell outside that grammar, so the
-    /// runtime was dropped server-side; `macos/14.6.1` carries the same
-    /// information inside it.
+    /// runtime token matching `[a-z]{1,10}/[0-9A-Za-z.+-]{1,24}`. OS identity
+    /// belongs in the beacon's separate `os` field, not this runtime token.
     static var userAgent: String {
-        #if os(macOS)
-        let os = "macos"
-        #elseif os(iOS)
-        let os = "ios"
-        #elseif os(tvOS)
-        let os = "tvos"
-        #elseif os(watchOS)
-        let os = "watchos"
-        #else
-        let os = "linux"
-        #endif
-        let v = ProcessInfo.processInfo.operatingSystemVersion
         return "trusted-router-swift/\(TrustedRouterConstants.version) "
-            + "\(os)/\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+            + TrustedRouterConstants.runtime
     }
 
     /// Case-insensitively set `name` to `value` in a header dictionary.

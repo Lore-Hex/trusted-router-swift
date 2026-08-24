@@ -54,6 +54,10 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "authorization"), "Bearer sk-test")
         XCTAssertEqual(request.value(forHTTPHeaderField: "x-trustedrouter-workspace"), "ws-test")
         XCTAssertEqual(request.value(forHTTPHeaderField: "content-type"), "application/json")
+        let userAgent = try XCTUnwrap(request.value(forHTTPHeaderField: "user-agent"))
+        let userAgentParts = userAgent.split(separator: " ", omittingEmptySubsequences: false)
+        XCTAssertEqual(userAgentParts.count, 2)
+        let userAgentRuntime = String(try XCTUnwrap(userAgentParts.last))
         let data = try XCTUnwrap(BeaconEndpointProtocol.bodies.first)
         XCTAssertLessThanOrEqual(data.count, 65_536)
         let encoded = String(decoding: data, as: UTF8.self)
@@ -69,6 +73,10 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         ]))
         XCTAssertEqual((batch["batch_id"] as? String)?.count, 32)
         XCTAssertEqual((batch["instance_id"] as? String)?.count, 16)
+        let sdk = try XCTUnwrap(batch["sdk"] as? [String: String])
+        XCTAssertEqual(sdk["runtime"], userAgentRuntime,
+                       "beacon and SDK-built User-Agent must share one runtime")
+        XCTAssertEqual(sdk["runtime"], TrustedRouterConstants.runtime)
         let events = try XCTUnwrap(batch["events"] as? [[String: Any]])
         let counters = try XCTUnwrap(batch["counters"] as? [[String: Any]])
         XCTAssertEqual(events.count, 1)
@@ -76,6 +84,54 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         XCTAssertEqual((events[0]["attempts"] as? [[String: Any]])?.count, 2)
         XCTAssertEqual(counters.filter { $0["level"] as? String == "request" }.count, 1)
         XCTAssertEqual(counters.filter { $0["level"] as? String == "attempt" }.count, 2)
+        await router.shutdown()
+    }
+
+    func testCallerUserAgentOverrideDoesNotReplaceBeaconSDKIdentity() async throws {
+        let callerUserAgent = "caller-owned-agent/1.0 caller-runtime/9"
+        let clock = BeaconClock(1)
+        let router = try makeRouter(
+            clock: clock, sampleRate: 1, maxRetries: 0,
+            headers: ["user-agent": callerUserAgent]
+        )
+        var inferenceRequests: [URLRequest] = []
+        MockURLProtocol.requestHandler = { request in
+            inferenceRequests.append(request)
+            return (
+                Self.response(
+                    request, status: 200,
+                    headers: ["x-request-id": "rlog_0123456789abcdef0123456789abcdef"]
+                ),
+                Data(#"{"ok":true}"#.utf8)
+            )
+        }
+        BeaconEndpointProtocol.script = [.init(status: 202)]
+
+        let result: [String: Bool] = try await router.request(
+            method: "POST", path: "/responses",
+            body: ["model": "model/a", "input": "hello"]
+        )
+        XCTAssertEqual(result["ok"], true)
+        let inferenceRequest = try XCTUnwrap(inferenceRequests.first)
+        XCTAssertEqual(
+            inferenceRequest.value(forHTTPHeaderField: "user-agent"), callerUserAgent,
+            "the caller owns the inference request's outbound identity"
+        )
+
+        let reporter = try XCTUnwrap(router.telemetryReporterStore?.existing())
+        let flushed = await reporter.flushNow()
+        XCTAssertTrue(flushed)
+        let beaconRequest = try XCTUnwrap(BeaconEndpointProtocol.requests.first)
+        XCTAssertEqual(
+            beaconRequest.value(forHTTPHeaderField: "user-agent"), TrustedRouter.userAgent
+        )
+        XCTAssertNotEqual(
+            beaconRequest.value(forHTTPHeaderField: "user-agent"), callerUserAgent
+        )
+        let batch = try Self.batch(at: 0)
+        let sdk = try XCTUnwrap(batch["sdk"] as? [String: String])
+        XCTAssertEqual(sdk["runtime"], TrustedRouterConstants.runtime)
+        XCTAssertTrue(TrustedRouterConstants.runtime.hasPrefix("swift/"))
         await router.shutdown()
     }
 
@@ -312,7 +368,8 @@ final class ClientTelemetryBeaconTests: XCTestCase {
     private func makeRouter(
         clock: BeaconClock,
         sampleRate: Double,
-        maxRetries: Int
+        maxRetries: Int,
+        headers: [String: String] = [:]
     ) throws -> TrustedRouter {
         let engineConfig = URLSessionConfiguration.ephemeral
         engineConfig.protocolClasses = [MockURLProtocol.self]
@@ -320,6 +377,7 @@ final class ClientTelemetryBeaconTests: XCTestCase {
         beaconConfig.protocolClasses = [BeaconEndpointProtocol.self]
         var options = TrustedRouterOptions(
             apiKey: "sk-test", urlSession: URLSession(configuration: engineConfig),
+            headers: headers,
             workspaceId: "ws-test", maxRetries: maxRetries, regionalFailover: true,
             telemetry: true, telemetrySampleRate: sampleRate, regionalAffinity: false
         )
