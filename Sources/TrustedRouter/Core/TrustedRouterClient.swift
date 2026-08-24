@@ -163,8 +163,12 @@ public final class TrustedRouter: Sendable {
         await telemetryReporterStore?.shutdown(timeout: 2)
     }
 
-    /// User-Agent string sent on every request. Includes the SDK version and
-    /// the shared compiler runtime identity used by the telemetry beacon.
+    /// User-Agent string built by the SDK. Its runtime and the beacon identity
+    /// come from one constant, so the SDK cannot report two different
+    /// runtimes. A caller may override the inference User-Agent through client
+    /// or per-call headers; the server then attributes that request by the
+    /// caller's string (`client_sdk`/`client_runtime` reflect the override),
+    /// while the beacon POST and identity report the SDK's true runtime.
     ///
     /// The shape is pinned by the client-telemetry contract (§3.1): the
     /// enclave parses `trusted-router-swift/SEMVER( runtime/ver)?` with the

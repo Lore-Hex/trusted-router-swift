@@ -15,8 +15,13 @@ public enum TrustedRouterConstants {
     // language compatibility mode and may be lower under `-swift-version`.
     // Conditional version checks prove only a floor, not the exact patch
     // release, so this reports the highest detected floor (for example,
-    // `swift/6.0` for any 6.0.x compiler). The fallback remains valid under
-    // the client-telemetry runtime-token grammar.
+    // `swift/6.0` for any 6.0.x compiler). This is the single source for the
+    // SDK-built User-Agent and the beacon identity, so the SDK's own two
+    // identities cannot report different runtimes. A caller can override the
+    // inference User-Agent; the server then attributes that request by the
+    // caller's string (`client_sdk`/`client_runtime` reflect the override),
+    // while the beacon continues to report the SDK's true runtime. The
+    // fallback remains valid under the client-telemetry runtime-token grammar.
     #if compiler(>=6.2)
     static let runtime = "swift/6.2"
     #elseif compiler(>=6.1)
