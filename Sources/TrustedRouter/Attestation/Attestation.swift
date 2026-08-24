@@ -141,7 +141,7 @@ extension TrustedRouter {
             throw TrustedRouterError.internalError("Invalid attestation URL: \(urlString)")
         }
         var req = URLRequest(url: url)
-        req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
+        req.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
         
         let (data, response) = try await credentialFreeURLSession
             .trustedRouterCredentialFreeData(for: req)
@@ -167,7 +167,7 @@ public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultT
         throw TrustedRouterError.internalError("Invalid trust release URL")
     }
     var req = URLRequest(url: url)
-    req.setValue("trusted-router-swift/\(TrustedRouterConstants.version)", forHTTPHeaderField: "user-agent")
+    req.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
     
     let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
         .trustedRouterCredentialFreeData(for: req)

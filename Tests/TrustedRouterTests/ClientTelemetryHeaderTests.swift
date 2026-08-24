@@ -904,7 +904,7 @@ final class ClientTelemetryHeaderTests: XCTestCase {
 
     // MARK: - §3.1 User-Agent grammar
 
-    func testUserAgentMatchesTheContractGrammar() {
+    func testUserAgentMatchesTheContractGrammar() throws {
         let semver = "(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)"
             + "(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?"
             + "(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?"
@@ -928,6 +928,26 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertTrue(
             agent.hasPrefix("trusted-router-swift/\(TrustedRouterConstants.version) "),
             "the version must be the SDK's own: \(agent)"
+        )
+        XCTAssertLessThanOrEqual(agent.utf8.count, 256, "User-Agent exceeds §3.1's byte limit")
+
+        let parts = agent.split(separator: " ", omittingEmptySubsequences: false)
+        XCTAssertEqual(parts.count, 2, "the User-Agent must contain exactly one runtime token")
+        let runtime = String(try XCTUnwrap(parts.last))
+        XCTAssertEqual(runtime, TrustedRouterConstants.runtime)
+        XCTAssertNotNil(
+            runtime.range(
+                of: "^swift/[0-9A-Za-z.+-]{1,24}$",
+                options: .regularExpression
+            ),
+            "Swift runtime identity is not grammar-valid: \(runtime)"
+        )
+        XCTAssertEqual(runtime.filter { $0 == "/" }.count, 1)
+        XCTAssertFalse(runtime.contains(where: { $0.isWhitespace }))
+        XCTAssertFalse(
+            ["macos", "ios", "tvos", "watchos", "linux", "windows", "android", "freebsd"]
+                .contains(runtime.split(separator: "/", maxSplits: 1).first.map(String.init) ?? ""),
+            "the runtime token must identify Swift, not an operating system: \(runtime)"
         )
     }
 }

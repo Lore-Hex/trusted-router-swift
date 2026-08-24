@@ -9,6 +9,28 @@ import FoundationNetworking
 /// Compile-time constants for the SDK: version, default endpoints, and models.
 public enum TrustedRouterConstants {
     public static let version = "0.8.0"
+
+    // Use `compiler` rather than `swift`: this identity describes the
+    // compiler/toolchain that built the SDK, while `swift` tests the selected
+    // language compatibility mode and may be lower under `-swift-version`.
+    // Conditional version checks prove only a floor, not the exact patch
+    // release, so this reports the highest detected floor (for example,
+    // `swift/6.0` for any 6.0.x compiler). The fallback remains valid under
+    // the client-telemetry runtime-token grammar.
+    #if compiler(>=6.2)
+    static let runtime = "swift/6.2"
+    #elseif compiler(>=6.1)
+    static let runtime = "swift/6.1"
+    #elseif compiler(>=6.0)
+    static let runtime = "swift/6.0"
+    #elseif compiler(>=5.10)
+    static let runtime = "swift/5.10"
+    #elseif compiler(>=5.9)
+    static let runtime = "swift/5.9"
+    #else
+    static let runtime = "swift/unknown"
+    #endif
+
     public static let defaultAPIBaseURL = "https://api.trustedrouter.com/v1"
     public static let defaultControlBaseURL = "https://trustedrouter.com/v1"
     public static let defaultTrustReleaseURL = "https://trust.trustedrouter.com/trust/gcp-release.json"
