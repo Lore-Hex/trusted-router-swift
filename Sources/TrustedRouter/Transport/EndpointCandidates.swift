@@ -117,6 +117,7 @@ actor RegionalEndpointSelector {
                     var request = URLRequest(url: url)
                     request.httpMethod = "GET"
                     request.timeoutInterval = timeout
+                    request.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
                     do {
                         let (_, response) = try await urlSession
                             .trustedRouterCredentialFreeData(for: request)

@@ -286,7 +286,8 @@ public func verifyGatewayAttestation(
         guard let url = URL(string: jwksUrl) else {
             throw AttestationVerificationError("Invalid JWKS URL")
         }
-        let request = URLRequest(url: url)
+        var request = URLRequest(url: url)
+        request.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
         let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
             .trustedRouterCredentialFreeData(for: request)
         if let resp = response as? HTTPURLResponse,

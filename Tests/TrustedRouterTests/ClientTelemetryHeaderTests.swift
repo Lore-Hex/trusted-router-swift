@@ -529,6 +529,69 @@ final class ClientTelemetryHeaderTests: XCTestCase {
         XCTAssertEqual(TelemetryCaptureProtocol.served, 0)
     }
 
+    func testVerifyGatewayAttestationJWKSFetchSendsSDKUserAgent() async {
+        TelemetryCaptureProtocol.reset()
+        TelemetryCaptureProtocol.scripted = [.response(200, #"{"keys":[]}"#)]
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TelemetryCaptureProtocol.self]
+        let parseableJWT = Data(
+            "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3QifQ.e30.AA".utf8
+        )
+
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: parseableJWT,
+                policy: AttestationPolicy(imageDigest: "sha256:abc"),
+                jwksUrl: "https://jwks.test/keys.json",
+                urlSession: URLSession(configuration: config)
+            )
+            XCTFail("expected empty JWKS validation to fail")
+        } catch {
+            // The request is the subject of this test; later verification may fail.
+        }
+
+        XCTAssertEqual(TelemetryCaptureProtocol.served, 1)
+        let userAgent = TelemetryCaptureProtocol.userAgents.first ?? nil
+        XCTAssertNotNil(userAgent)
+        XCTAssertTrue(userAgent?.hasPrefix("trusted-router-swift/") == true)
+        XCTAssertEqual(userAgent, TrustedRouter.userAgent)
+        XCTAssertEqual(TelemetryCaptureProtocol.telemetryHeaders, [nil])
+    }
+
+    func testRegionalHealthProbesSendSDKUserAgent() async {
+        TelemetryCaptureProtocol.reset()
+        let probeCount = TrustedRouterConstants.regionBaseURLs.count + 1
+        TelemetryCaptureProtocol.scripted = Array(
+            repeating: .response(500, "{}"),
+            count: probeCount
+        )
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TelemetryCaptureProtocol.self]
+        let selector = RegionalEndpointSelector(
+            primaryBaseURL: TrustedRouterConstants.defaultAPIBaseURL,
+            urlSession: URLSession(configuration: config),
+            timeout: 0.2
+        )
+
+        _ = await selector.endpoints()
+
+        XCTAssertEqual(TelemetryCaptureProtocol.served, probeCount)
+        XCTAssertEqual(
+            TelemetryCaptureProtocol.requestedPaths,
+            Array(repeating: "/health", count: probeCount)
+        )
+        XCTAssertTrue(TelemetryCaptureProtocol.userAgents.allSatisfy { $0 != nil })
+        XCTAssertTrue(
+            TelemetryCaptureProtocol.userAgents.allSatisfy {
+                $0?.hasPrefix("trusted-router-swift/") == true
+            }
+        )
+        XCTAssertTrue(
+            TelemetryCaptureProtocol.userAgents.allSatisfy { $0 == TrustedRouter.userAgent }
+        )
+        XCTAssertTrue(TelemetryCaptureProtocol.telemetryHeaders.allSatisfy { $0 == nil })
+    }
+
     func testUnrelatedSessionDefaultHeadersAreLeftAlone() async throws {
         // The refusal is narrow: it is about one reserved field, not a ban on
         // configuring a session. Any other default header is accepted and the
@@ -962,6 +1025,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         case failure(URLError)
     }
 
+    private static let captureLock = NSLock()
     nonisolated(unsafe) static var scripted: [Outcome] = []
     nonisolated(unsafe) static var served = 0
     nonisolated(unsafe) static var requestedHosts: [String] = []
@@ -971,6 +1035,8 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var corporateTraceHeaders: [String?] = []
 
     static func reset() {
+        captureLock.lock()
+        defer { captureLock.unlock() }
         scripted = []
         served = 0
         requestedHosts = []
@@ -985,6 +1051,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 
     override func startLoading() {
+        Self.captureLock.lock()
         Self.requestedHosts.append(request.url?.host ?? "")
         Self.requestedPaths.append(request.url?.path ?? "")
         Self.telemetryHeaders.append(request.value(forHTTPHeaderField: "x-tr-client"))
@@ -995,6 +1062,7 @@ final class TelemetryCaptureProtocol: URLProtocol, @unchecked Sendable {
         let outcome: Outcome = index < Self.scripted.count
             ? Self.scripted[index]
             : .failure(URLError(.unknown))
+        Self.captureLock.unlock()
         switch outcome {
         case .failure(let error):
             client?.urlProtocol(self, didFailWithError: error)
