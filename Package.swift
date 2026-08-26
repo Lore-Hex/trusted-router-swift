@@ -24,6 +24,9 @@ let package = Package(
             dependencies: []),
         .testTarget(
             name: "TrustedRouterTests",
-            dependencies: ["TrustedRouter"]),
+            dependencies: ["TrustedRouter"],
+            resources: [
+                .copy("Fixtures/receipts")
+            ]),
     ]
 )
