@@ -123,6 +123,11 @@ and `subagentTool`.
   eager queue. Linux therefore preserves parser bounds and API compatibility,
   but does **not** provide bounded-memory live network streaming.
 - **Attestation Verification**: Verifies the Confidential Space JWT using `CryptoKit`/`Security`.
+- **Inference receipt verification**: Verifies compact and flattened v1 JWS
+  receipts, exact request/response hashes, strict SSE hash domains, nonce/time
+  bounds, upstream windows, and embedded GCP key commitments. Ed25519 uses
+  `CryptoKit.Curve25519.Signing` (available on macOS 10.15+ and iOS 13+; the
+  package's currently declared deployment targets are higher).
 - **Pure Swift**: No 3rd party dependencies. Operates seamlessly on macOS, iOS, tvOS, watchOS, and Linux with `FoundationNetworking`.
 - **Retries**: Implements transparent exponential backoff on `429` responses and regional failover for `502`/`503`/`504` or transport errors.
 - **Transport isolation**: An injected `URLSession` contributes its
