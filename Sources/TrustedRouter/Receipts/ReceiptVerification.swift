@@ -83,6 +83,9 @@ public struct ReceiptVerificationOptions: Sendable {
     public var expectedNonce: String?
     public var maxAgeSeconds: TimeInterval?
     public var now: TimeInterval?
+    /// Exact GCP Confidential Space attestation JWT bytes for a compact
+    /// receipt. The document must match the receipt's `att_sha256` claim.
+    public var attestation: Data?
     public var requireAttestation: Bool
 
     public init(
@@ -92,6 +95,7 @@ public struct ReceiptVerificationOptions: Sendable {
         expectedNonce: String? = nil,
         maxAgeSeconds: TimeInterval? = nil,
         now: TimeInterval? = nil,
+        attestation: Data? = nil,
         requireAttestation: Bool = true
     ) {
         self.requestBody = requestBody
@@ -100,6 +104,7 @@ public struct ReceiptVerificationOptions: Sendable {
         self.expectedNonce = expectedNonce
         self.maxAgeSeconds = maxAgeSeconds
         self.now = now
+        self.attestation = attestation
         self.requireAttestation = requireAttestation
     }
 }
@@ -732,14 +737,14 @@ private func streamDigest(
     return (try receiptSHA256(preimage), eventCount)
 }
 
-typealias ReceiptGCPAttestationVerifier = @Sendable (_ document: String, _ commitment: Data) async throws -> Void
+typealias ReceiptGCPAttestationVerifier = @Sendable (_ document: Data, _ commitment: Data) async throws -> Void
 
-private func verifyGCPAttestation(_ document: String, commitment: Data) async throws {
+private func verifyGCPAttestation(_ document: Data, commitment: Data) async throws {
     let policy = try await policyFromTrustRelease()
-    _ = try await verifyGatewayAttestation(
-        document: Data(document.utf8),
+    try await verifyReceiptKeyAttestation(
+        document: document,
         policy: policy,
-        nonceHex: commitment.map { String(format: "%02x", $0) }.joined()
+        keyCommitmentHex: commitment.map { String(format: "%02x", $0) }.joined()
     )
 }
 
@@ -747,31 +752,66 @@ private func verifyAttestation(
     envelope: JWSEnvelope,
     header: [String: Any],
     publicKey: Data,
+    suppliedAttestation: Data?,
+    attSha256: String?,
     requireAttestation: Bool,
     gcpVerifier: ReceiptGCPAttestationVerifier
 ) async throws -> ReceiptAttestationStatus {
-    guard envelope.flattened else {
-        guard !requireAttestation else {
+    let document: Data
+    if !envelope.flattened {
+        guard let suppliedAttestation else {
+            guard !requireAttestation else {
+                throw MissingAttestationError(
+                    "attestation check failed: compact receipts omit attestation evidence; obtain the pinned document or explicitly pass requireAttestation: false"
+                )
+            }
+            return .unverifiedByThisSDK
+        }
+        guard let attSha256 else {
             throw MissingAttestationError(
-                "attestation check failed: compact receipts omit attestation evidence; obtain the pinned document or explicitly pass requireAttestation: false"
+                "attestation check failed: compact receipt has no att_sha256 claim"
             )
         }
-        return .unverifiedByThisSDK
-    }
-    guard let rawKind = header["att_kind"], !(rawKind is NSNull) else {
-        throw MissingAttestationError("attestation check failed: flattened receipt has no att_kind")
-    }
-    guard let kind = rawKind as? String else {
-        throw UnsupportedAttestationError("attestation kind check failed: att_kind must be a supported string")
-    }
-    if kind == "aws-nitro-cose" || kind == "azure-maa-jwt" {
-        throw UnsupportedAttestationError("attestation kind check failed: '\(kind)' is not supported by this SDK")
-    }
-    guard kind == "gcp-cs-jwt" else {
-        throw UnsupportedAttestationError("attestation kind check failed: unsupported att_kind '\(kind)'")
-    }
-    guard let document = header["att"] as? String, !document.isEmpty else {
-        throw MissingAttestationError("attestation check failed: flattened receipt has no embedded att")
+        let expectedDigest: Data
+        do {
+            expectedDigest = try base64URLDecode(attSha256, check: "att_sha256 claim")
+        } catch let error as ReceiptVerificationError {
+            throw ReceiptAttestationError(error.message)
+        }
+        guard constantTimeEqual(try receiptSHA256(suppliedAttestation), expectedDigest) else {
+            throw ReceiptAttestationError(
+                "att_sha256 check failed: supplied attestation does not match the compact receipt"
+            )
+        }
+        document = suppliedAttestation
+    } else {
+        guard let rawKind = header["att_kind"], !(rawKind is NSNull) else {
+            throw MissingAttestationError("attestation check failed: flattened receipt has no att_kind")
+        }
+        guard let kind = rawKind as? String else {
+            throw UnsupportedAttestationError("attestation kind check failed: att_kind must be a supported string")
+        }
+        if kind == "aws-nitro-cose" || kind == "azure-maa-jwt" {
+            throw UnsupportedAttestationError("attestation kind check failed: '\(kind)' is not supported by this SDK")
+        }
+        guard kind == "gcp-cs-jwt" else {
+            throw UnsupportedAttestationError("attestation kind check failed: unsupported att_kind '\(kind)'")
+        }
+        guard let embedded = header["att"] as? String, !embedded.isEmpty else {
+            throw MissingAttestationError("attestation check failed: flattened receipt has no embedded att")
+        }
+        guard embedded.utf8.allSatisfy({ $0 <= 0x7f }) else {
+            throw ReceiptAttestationError(
+                "attestation check failed: flattened receipt att must be ASCII"
+            )
+        }
+        document = Data(embedded.utf8)
+        if let suppliedAttestation,
+           !constantTimeEqual(suppliedAttestation, document) {
+            throw ReceiptAttestationError(
+                "attestation check failed: supplied attestation does not match the flattened receipt's embedded attestation"
+            )
+        }
     }
     let commitment = try receiptSHA256(keyCommitmentDomain + publicKey)
     do {
@@ -785,6 +825,13 @@ private func verifyAttestation(
 }
 
 /// Verifies a compact or flattened inference receipt and returns its typed v1 claims.
+///
+/// Compact receipts cannot carry their attestation document. Supply its exact
+/// bytes as `ReceiptVerificationOptions.attestation` to check the pinned digest
+/// and verify the signing-key binding. `requireAttestation: false` remains an
+/// explicit signature-and-hashes-only escape hatch when those bytes are not
+/// available. A supplied document for a flattened receipt must equal its
+/// embedded document.
 ///
 /// Ed25519 verification uses `CryptoKit.Curve25519.Signing` and therefore has
 /// a cryptographic availability floor of macOS 10.15 and iOS 13. The package's
@@ -802,7 +849,13 @@ public func verifyReceipt(
     _ receipt: Data,
     options: ReceiptVerificationOptions = ReceiptVerificationOptions()
 ) async throws -> ReceiptClaims {
-    try await verifyReceipt(receipt, options: options, gcpAttestationVerifier: verifyGCPAttestation)
+    try await verifyReceipt(
+        receipt,
+        options: options,
+        gcpAttestationVerifier: { document, commitment in
+            try await verifyGCPAttestation(document, commitment: commitment)
+        }
+    )
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
@@ -1001,6 +1054,8 @@ func verifyReceipt(
         envelope: envelope,
         header: header,
         publicKey: publicKey,
+        suppliedAttestation: options.attestation,
+        attSha256: attSha256,
         requireAttestation: options.requireAttestation,
         gcpVerifier: gcpAttestationVerifier
     )
@@ -1085,7 +1140,12 @@ public final class ReceiptCapture: @unchecked Sendable {
     public func verify(
         options: ReceiptVerificationOptions = ReceiptVerificationOptions()
     ) async throws -> ReceiptClaims {
-        try await verify(options: options, gcpAttestationVerifier: verifyGCPAttestation)
+        try await verify(
+            options: options,
+            gcpAttestationVerifier: { document, commitment in
+                try await verifyGCPAttestation(document, commitment: commitment)
+            }
+        )
     }
 
     @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)

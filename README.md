@@ -138,6 +138,18 @@ and `subagentTool`.
   pinning, mTLS/client-certificate selection, and authentication customization
   are therefore intentionally not inherited by SDK requests.
 
+### Receipt attestation documents
+
+Compact receipts pin, but do not embed, their GCP key-binding attestation.
+Pass the exact document bytes in `ReceiptVerificationOptions(attestation:)`;
+the verifier first checks them against the receipt's `att_sha256` claim and
+then verifies the Confidential Space chain and durable signing-key commitment.
+
+`/receipt-attestation` serves a **per-instance** document. Behind a load
+balancer, callers may initially reach a different instance than the one that
+signed the compact receipt. Retry the fetch until the document's SHA-256
+matches `att_sha256`, then pass those exact bytes to `verifyReceipt`.
+
 ## Domain failover
 
 The regional gateways all live under one name on one DNS provider, and the
