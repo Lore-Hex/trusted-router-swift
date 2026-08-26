@@ -238,6 +238,18 @@ func b64urlDecode(_ base64URLEncoded: String) -> Data? {
     return Data(base64Encoded: base64)
 }
 
+private enum AttestationBindingMode: Equatable {
+    case liveChannel
+    case receiptKey
+}
+
+typealias AttestationSignatureVerifier = @Sendable (
+    _ jwks: [String: Any],
+    _ header: [String: Any],
+    _ signingInput: Data,
+    _ signature: Data
+) throws -> Void
+
 public func verifyGatewayAttestation(
     document: Data,
     policy: AttestationPolicy,
@@ -248,7 +260,123 @@ public func verifyGatewayAttestation(
     jwksUrl: String = GCPJwksURI,
     urlSession: URLSession = .shared
 ) async throws -> GatewayAttestation {
-    
+    try await verifyGatewayAttestation(
+        document: document,
+        policy: policy,
+        nonceHex: nonceHex,
+        tlsCertDer: tlsCertDer,
+        tlsExporter: tlsExporter,
+        jwks: jwks,
+        jwksUrl: jwksUrl,
+        urlSession: urlSession,
+        signatureVerifier: { jwks, header, signingInput, signature in
+            try verifyRS256(
+                jwks: jwks,
+                header: header,
+                signingInput: signingInput,
+                signatureData: signature
+            )
+        }
+    )
+}
+
+func verifyGatewayAttestation(
+    document: Data,
+    policy: AttestationPolicy,
+    nonceHex: String? = nil,
+    tlsCertDer: Data? = nil,
+    tlsExporter: Data? = nil,
+    jwks: [String: Any]? = nil,
+    jwksUrl: String = GCPJwksURI,
+    urlSession: URLSession = .shared,
+    signatureVerifier: AttestationSignatureVerifier
+) async throws -> GatewayAttestation {
+    let payload = try await verifiedJWTClaims(
+        document: document,
+        jwks: jwks,
+        jwksUrl: jwksUrl,
+        urlSession: urlSession,
+        entryPoint: "verifyGatewayAttestation",
+        signatureVerifier: signatureVerifier
+    )
+    return try checkClaims(
+        claims: payload,
+        policy: policy,
+        nonceHex: nonceHex,
+        tlsCertDer: tlsCertDer,
+        tlsExporter: tlsExporter,
+        bindingMode: .liveChannel
+    )
+}
+
+/// Verifies a GCP Confidential Space key-binding attestation for a receipt
+/// signing key.
+///
+/// This applies the same issuer-JWKS signature, validity, debug, hardware, and
+/// image-policy checks as `verifyGatewayAttestation`, but deliberately omits
+/// TLS certificate/exporter binding. `keyCommitmentHex` must occur somewhere
+/// in the document's `eat_nonce` set.
+public func verifyReceiptKeyAttestation(
+    document: Data,
+    policy: AttestationPolicy,
+    keyCommitmentHex: String,
+    jwks: [String: Any]? = nil,
+    jwksUrl: String = GCPJwksURI,
+    urlSession: URLSession = .shared
+) async throws {
+    try await verifyReceiptKeyAttestation(
+        document: document,
+        policy: policy,
+        keyCommitmentHex: keyCommitmentHex,
+        jwks: jwks,
+        jwksUrl: jwksUrl,
+        urlSession: urlSession,
+        signatureVerifier: { jwks, header, signingInput, signature in
+            try verifyRS256(
+                jwks: jwks,
+                header: header,
+                signingInput: signingInput,
+                signatureData: signature
+            )
+        }
+    )
+}
+
+func verifyReceiptKeyAttestation(
+    document: Data,
+    policy: AttestationPolicy,
+    keyCommitmentHex: String,
+    jwks: [String: Any]? = nil,
+    jwksUrl: String = GCPJwksURI,
+    urlSession: URLSession = .shared,
+    signatureVerifier: AttestationSignatureVerifier
+) async throws {
+    let payload = try await verifiedJWTClaims(
+        document: document,
+        jwks: jwks,
+        jwksUrl: jwksUrl,
+        urlSession: urlSession,
+        entryPoint: "verifyReceiptKeyAttestation",
+        signatureVerifier: signatureVerifier
+    )
+    _ = try checkClaims(
+        claims: payload,
+        policy: policy,
+        nonceHex: keyCommitmentHex,
+        tlsCertDer: nil,
+        tlsExporter: nil,
+        bindingMode: .receiptKey
+    )
+}
+
+private func verifiedJWTClaims(
+    document: Data,
+    jwks: [String: Any]?,
+    jwksUrl: String,
+    urlSession: URLSession,
+    entryPoint: String,
+    signatureVerifier: AttestationSignatureVerifier
+) async throws -> [String: Any] {
     guard let text = String(data: document, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
         throw AttestationVerificationError("Invalid JWT data")
     }
@@ -280,7 +408,7 @@ public func verifyGatewayAttestation(
     } else {
         if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(urlSession) {
             throw reservedTelemetrySessionDefaultError(
-                reservedName, entryPoint: "verifyGatewayAttestation"
+                reservedName, entryPoint: entryPoint
             )
         }
         guard let url = URL(string: jwksUrl) else {
@@ -299,8 +427,18 @@ public func verifyGatewayAttestation(
         }
         activeJwks = json
     }
-    
-    guard let keys = activeJwks["keys"] as? [[String: Any]] else {
+
+    try signatureVerifier(activeJwks, header, signingInput, signatureData)
+    return payload
+}
+
+private func verifyRS256(
+    jwks: [String: Any],
+    header: [String: Any],
+    signingInput: Data,
+    signatureData: Data
+) throws {
+    guard let keys = jwks["keys"] as? [[String: Any]] else {
         throw AttestationVerificationError("JWKS response missing keys array")
     }
     
@@ -345,9 +483,6 @@ public func verifyGatewayAttestation(
         throw AttestationVerificationError("JWT signature verification failed")
     }
     #endif
-    
-    // Check claims
-    return try checkClaims(claims: payload, policy: policy, nonceHex: nonceHex, tlsCertDer: tlsCertDer, tlsExporter: tlsExporter)
 }
 
 /// A caller-provided session cannot be allowed to default the SDK-reserved
@@ -366,7 +501,14 @@ private func reservedTelemetrySessionDefaultError(
     )
 }
 
-private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonceHex: String?, tlsCertDer: Data?, tlsExporter: Data?) throws -> GatewayAttestation {
+private func checkClaims(
+    claims: [String: Any],
+    policy: AttestationPolicy,
+    nonceHex: String?,
+    tlsCertDer: Data?,
+    tlsExporter: Data?,
+    bindingMode: AttestationBindingMode
+) throws -> GatewayAttestation {
     let now = Int(Date().timeIntervalSince1970)
     guard let exp = claims["exp"] as? Int else {
         throw AttestationVerificationError("JWT is missing a valid expiration")
@@ -431,6 +573,7 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
         throw AttestationVerificationError("image_reference mismatch: workload=\(imageReference), policy=\(acceptedImageReferences)")
     }
     
+    let rawEatNonces = claims["eat_nonce"]
     var nonces: [String] = []
     if let nString = claims["eat_nonce"] as? String {
         nonces.append(nString)
@@ -444,13 +587,30 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
     
     var nonceMatch: String? = nil
     if let nonceHex = nonceHex {
-        if !nonces.contains(where: { constantTimeEquals($0, nonceHex) }) {
+        let noncePresent: Bool
+        switch bindingMode {
+        case .liveChannel:
+            noncePresent = nonces.contains(where: { constantTimeEquals($0, nonceHex) })
+        case .receiptKey:
+            let receiptNonces: [String]
+            if let nonce = rawEatNonces as? String {
+                receiptNonces = [nonce]
+            } else if let values = rawEatNonces as? [Any] {
+                receiptNonces = values.compactMap { $0 as? String }
+            } else {
+                receiptNonces = []
+            }
+            noncePresent = receiptNonces.contains(where: {
+                constantTimeEquals($0.lowercased(), nonceHex.lowercased())
+            })
+        }
+        if !noncePresent {
             throw AttestationVerificationError("nonce \(nonceHex) not present in JWT nonces \(nonces)")
         }
         nonceMatch = nonceHex
     }
 
-    if let tlsExporter = tlsExporter {
+    if bindingMode == .liveChannel, let tlsExporter = tlsExporter {
         guard let nonceHex = nonceHex else {
             throw AttestationVerificationError("fresh nonce required with exporter binding")
         }
@@ -465,36 +625,44 @@ private func checkClaims(claims: [String: Any], policy: AttestationPolicy, nonce
         }
     }
     
-    var certSha = claims["tls_cert_sha256"] as? String ?? claims["workload_tls_cert_sha256"] as? String
-    
-    #if canImport(CryptoKit)
-    if certSha == nil, let tlsCertDer = tlsCertDer {
-        let actual = SHA256.hash(data: tlsCertDer).compactMap { String(format: "%02x", $0) }.joined()
-        for n in nonces {
-            if n.lowercased() == actual {
-                certSha = actual
-                break
+    let lowerCertSha: String
+    switch bindingMode {
+    case .liveChannel:
+        var certSha = claims["tls_cert_sha256"] as? String ?? claims["workload_tls_cert_sha256"] as? String
+
+        #if canImport(CryptoKit)
+        if certSha == nil, let tlsCertDer = tlsCertDer {
+            let actual = SHA256.hash(data: tlsCertDer).compactMap { String(format: "%02x", $0) }.joined()
+            for n in nonces {
+                if n.lowercased() == actual {
+                    certSha = actual
+                    break
+                }
             }
         }
-    }
-    #endif
-    
-    guard let cSha = certSha, cSha.count == 64 else {
-        throw AttestationVerificationError("JWT does not commit to a TLS cert SHA-256 — cannot bind connection")
-    }
-    let lowerCertSha = cSha.lowercased()
-    
-    #if canImport(CryptoKit)
-    if let tlsCertDer = tlsCertDer {
-        let actual = SHA256.hash(data: tlsCertDer).compactMap { String(format: "%02x", $0) }.joined()
-        if actual != lowerCertSha {
-            throw AttestationVerificationError("TLS cert mismatch: connection=\(actual), JWT=\(lowerCertSha)")
+        #endif
+
+        guard let cSha = certSha, cSha.count == 64 else {
+            throw AttestationVerificationError("JWT does not commit to a TLS cert SHA-256 — cannot bind connection")
         }
-    }
-    #endif
-    
-    if let pCertSha = policy.certSha256?.lowercased(), lowerCertSha != pCertSha {
-        throw AttestationVerificationError("JWT-committed cert SHA-256 doesn't match policy pin")
+        lowerCertSha = cSha.lowercased()
+
+        #if canImport(CryptoKit)
+        if let tlsCertDer = tlsCertDer {
+            let actual = SHA256.hash(data: tlsCertDer).compactMap { String(format: "%02x", $0) }.joined()
+            if actual != lowerCertSha {
+                throw AttestationVerificationError("TLS cert mismatch: connection=\(actual), JWT=\(lowerCertSha)")
+            }
+        }
+        #endif
+
+        if let pCertSha = policy.certSha256?.lowercased(), lowerCertSha != pCertSha {
+            throw AttestationVerificationError("JWT-committed cert SHA-256 doesn't match policy pin")
+        }
+    case .receiptKey:
+        // A receipt attestation certifies a durable signing key. It is not
+        // evidence about the verifier's current TLS connection.
+        lowerCertSha = ""
     }
     
     return GatewayAttestation(

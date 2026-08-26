@@ -31,7 +31,7 @@ final class ReceiptVerificationTests: XCTestCase {
             }
 
             // Frozen streaming vectors contain signed placeholder evidence.
-            // Production calls always use verifyGatewayAttestation instead.
+            // Production calls always use verifyReceiptKeyAttestation instead.
             let verified = try await verifyReceipt(
                 receipt,
                 options: options,
@@ -216,9 +216,134 @@ final class ReceiptVerificationTests: XCTestCase {
             }
         )
         let expected = hash(Data("inference-receipt-key-v1\0".utf8) + generated.publicKey)
-        XCTAssertEqual(recorder.document, "fixture.jwt.placeholder")
+        XCTAssertEqual(recorder.document, Data("fixture.jwt.placeholder".utf8))
         XCTAssertEqual(recorder.commitment, expected)
         XCTAssertEqual(verified.attestationStatus, .verified)
+    }
+
+    func testReceiptKeyBindingAcceptsNonceSetMembershipButLiveBindingRejectsIt() async throws {
+        let policy = AttestationPolicy(imageDigest: "sha256:abc123")
+        for commitmentPosition in [0, 2] {
+            let key = Curve25519.Signing.PrivateKey()
+            let commitment = hash(keyCommitmentTestDomain + key.publicKey.rawRepresentation)
+            var nonces = [String(repeating: "a", count: 64), String(repeating: "b", count: 64)]
+            nonces.insert(commitment.hexString, at: commitmentPosition)
+            let document = try gcpKeyAttestation(nonces: nonces)
+            var claims = baseClaims()
+            claims.removeValue(forKey: "att_sha256")
+            let generated = try makeReceipt(
+                claims: claims,
+                flattened: true,
+                headerUpdates: ["att": try XCTUnwrap(String(data: document, encoding: .ascii))],
+                key: key
+            )
+
+            let verified = try await verifyReceipt(
+                generated.raw,
+                options: ReceiptVerificationOptions(now: fixedNow),
+                gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
+            )
+            XCTAssertEqual(verified.attestationStatus, .verified)
+
+            do {
+                _ = try await verifyGatewayAttestation(
+                    document: document,
+                    policy: policy,
+                    jwks: [:],
+                    signatureVerifier: mockedAttestationSignature
+                )
+                XCTFail("expected live-channel TLS certificate binding failure")
+            } catch let error as AttestationVerificationError {
+                XCTAssertTrue(error.message.contains("TLS cert"), error.message)
+            }
+        }
+    }
+
+    func testReceiptKeyBindingRejectsWrongCommitment() async throws {
+        let policy = AttestationPolicy(imageDigest: "sha256:abc123")
+        let document = try gcpKeyAttestation(nonces: [
+            String(repeating: "a", count: 64),
+            String(repeating: "b", count: 64),
+            String(repeating: "c", count: 64),
+        ])
+        var claims = baseClaims()
+        claims.removeValue(forKey: "att_sha256")
+        let generated = try makeReceipt(
+            claims: claims,
+            flattened: true,
+            headerUpdates: ["att": try XCTUnwrap(String(data: document, encoding: .ascii))]
+        )
+
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                options: ReceiptVerificationOptions(now: fixedNow),
+                gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
+            )
+            XCTFail("expected receipt key commitment failure")
+        } catch let error as ReceiptAttestationError {
+            XCTAssertTrue(error.message.contains("not present in JWT nonces"), error.message)
+        }
+    }
+
+    func testCompactReceiptVerifiesSuppliedPinnedAttestation() async throws {
+        let policy = AttestationPolicy(imageDigest: "sha256:abc123")
+        let key = Curve25519.Signing.PrivateKey()
+        let commitment = hash(keyCommitmentTestDomain + key.publicKey.rawRepresentation)
+        let document = try gcpKeyAttestation(nonces: [
+            String(repeating: "a", count: 64),
+            String(repeating: "b", count: 64),
+            commitment.hexString,
+        ])
+        var claims = baseClaims()
+        claims["att_sha256"] = encode(hash(document))
+        let generated = try makeReceipt(claims: claims, key: key)
+
+        let verified = try await verifyReceipt(
+            generated.raw,
+            options: ReceiptVerificationOptions(now: fixedNow, attestation: document),
+            gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
+        )
+        XCTAssertEqual(verified.attestationStatus, .verified)
+
+        var changed = document
+        changed[changed.index(before: changed.endIndex)] ^= 1
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                options: ReceiptVerificationOptions(now: fixedNow, attestation: changed),
+                gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
+            )
+            XCTFail("expected compact attestation digest failure")
+        } catch let error as ReceiptAttestationError {
+            XCTAssertTrue(error.message.contains("att_sha256 check failed"), error.message)
+        }
+    }
+
+    func testFlattenedReceiptRejectsMismatchedSuppliedAttestation() async throws {
+        let document = try gcpKeyAttestation(nonces: [String(repeating: "a", count: 64)])
+        var claims = baseClaims()
+        claims.removeValue(forKey: "att_sha256")
+        let generated = try makeReceipt(
+            claims: claims,
+            flattened: true,
+            headerUpdates: ["att": try XCTUnwrap(String(data: document, encoding: .ascii))]
+        )
+
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                options: ReceiptVerificationOptions(
+                    now: fixedNow,
+                    attestation: document + Data("x".utf8)
+                ),
+                gcpAttestationVerifier: { _, _ in }
+            )
+            XCTFail("expected flattened attestation mismatch")
+        } catch let error as ReceiptAttestationError {
+            XCTAssertTrue(error.message.contains("does not match"), error.message)
+            XCTAssertTrue(error.message.contains("embedded attestation"), error.message)
+        }
     }
 
     func testMissingAttestationRaisesByDefault() async throws {
@@ -330,6 +455,53 @@ final class ReceiptVerificationTests: XCTestCase {
             ],
             "att_sha256": encode(hash(Data("attestation".utf8))),
         ]
+    }
+
+    private var keyCommitmentTestDomain: Data {
+        Data("inference-receipt-key-v1\0".utf8)
+    }
+
+    private var mockedAttestationSignature: AttestationSignatureVerifier {
+        { _, _, _, _ in }
+    }
+
+    private func mockedReceiptKeyVerifier(
+        policy: AttestationPolicy
+    ) -> ReceiptGCPAttestationVerifier {
+        let signatureVerifier = mockedAttestationSignature
+        return { document, commitment in
+            try await verifyReceiptKeyAttestation(
+                document: document,
+                policy: policy,
+                keyCommitmentHex: commitment.hexString,
+                jwks: [:],
+                signatureVerifier: signatureVerifier
+            )
+        }
+    }
+
+    private func gcpKeyAttestation(nonces: [String]) throws -> Data {
+        let header = try JSONSerialization.data(withJSONObject: [
+            "alg": "RS256",
+            "kid": "test-kid",
+        ], options: [.sortedKeys])
+        let claims = try JSONSerialization.data(withJSONObject: [
+            "iss": GCPIssuer,
+            "aud": ["quill-cloud"],
+            "exp": 4_000_000_000,
+            "dbgstat": "disabled-since-boot",
+            "swname": "CONFIDENTIAL_SPACE",
+            "secboot": true,
+            "hwmodel": "GCP_AMD_SEV",
+            "submods": [
+                "container": [
+                    "image_digest": "sha256:abc123",
+                    "image_reference": "registry.example/image:tag",
+                ],
+            ],
+            "eat_nonce": nonces,
+        ], options: [.sortedKeys])
+        return Data("\(encode(header)).\(encode(claims)).\(encode(Data("fake-signature".utf8)))".utf8)
     }
 
     private func makeStreamReceipt(eventsClaim: Int = 1) throws -> GeneratedStream {
@@ -501,10 +673,10 @@ private struct GeneratedStream {
 
 private final class CommitmentRecorder: @unchecked Sendable {
     private let lock = NSLock()
-    private var savedDocument: String?
+    private var savedDocument: Data?
     private var savedCommitment: Data?
 
-    var document: String? {
+    var document: Data? {
         lock.lock()
         defer { lock.unlock() }
         return savedDocument
@@ -516,7 +688,7 @@ private final class CommitmentRecorder: @unchecked Sendable {
         return savedCommitment
     }
 
-    func record(document: String, commitment: Data) {
+    func record(document: Data, commitment: Data) {
         lock.lock()
         defer { lock.unlock() }
         savedDocument = document
