@@ -23,6 +23,8 @@ public final class ReceiptStructureError: ReceiptVerificationError, @unchecked S
 public final class ReceiptHeaderError: ReceiptVerificationError, @unchecked Sendable {}
 public final class ReceiptSignatureError: ReceiptVerificationError, @unchecked Sendable {}
 public class ReceiptClaimsError: ReceiptVerificationError, @unchecked Sendable {}
+public final class MissingBindingError: ReceiptClaimsError, @unchecked Sendable {}
+public final class ReceiptIssuerError: ReceiptClaimsError, @unchecked Sendable {}
 public final class ReceiptTimeError: ReceiptClaimsError, @unchecked Sendable {}
 public final class ReceiptNonceError: ReceiptClaimsError, @unchecked Sendable {}
 public final class ReceiptUpstreamError: ReceiptClaimsError, @unchecked Sendable {}
@@ -87,6 +89,9 @@ public struct ReceiptVerificationOptions: Sendable {
     /// receipt. The document must match the receipt's `att_sha256` claim.
     public var attestation: Data?
     public var requireAttestation: Bool
+    /// Whether verification must bind both the request and one response
+    /// representation to the receipt's signed digests.
+    public var requireBindings: Bool
 
     public init(
         requestBody: Data? = nil,
@@ -96,7 +101,8 @@ public struct ReceiptVerificationOptions: Sendable {
         maxAgeSeconds: TimeInterval? = nil,
         now: TimeInterval? = nil,
         attestation: Data? = nil,
-        requireAttestation: Bool = true
+        requireAttestation: Bool = true,
+        requireBindings: Bool = true
     ) {
         self.requestBody = requestBody
         self.responseBody = responseBody
@@ -106,6 +112,7 @@ public struct ReceiptVerificationOptions: Sendable {
         self.now = now
         self.attestation = attestation
         self.requireAttestation = requireAttestation
+        self.requireBindings = requireBindings
     }
 }
 
@@ -521,6 +528,72 @@ private func optionalString(
     return value
 }
 
+private func canonicalHTTPSOrigin(_ value: String, check: String) throws -> String {
+    guard !value.isEmpty else {
+        throw ReceiptIssuerError("\(check) check failed: required HTTPS origin is missing")
+    }
+    guard let components = URLComponents(string: value),
+          let scheme = components.scheme,
+          scheme.lowercased() == "https" else {
+        throw ReceiptIssuerError("\(check) check failed: issuer origin must use https")
+    }
+    guard let host = components.host, !host.isEmpty,
+          components.user == nil,
+          components.password == nil,
+          ["", "/"].contains(components.percentEncodedPath),
+          components.percentEncodedQuery == nil,
+          components.percentEncodedFragment == nil else {
+        throw ReceiptIssuerError(
+            "\(check) check failed: expected an origin with no path, query, or fragment"
+        )
+    }
+    guard host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+        throw ReceiptIssuerError("\(check) check failed: invalid HTTPS origin host")
+    }
+    if let port = components.port, !(0...65_535).contains(port) {
+        throw ReceiptIssuerError("\(check) check failed: invalid HTTPS origin")
+    }
+
+    let normalizedHost = host.lowercased()
+    let renderedHost: String
+    if normalizedHost.hasPrefix("[") && normalizedHost.hasSuffix("]") {
+        renderedHost = normalizedHost
+    } else if normalizedHost.contains(":") {
+        renderedHost = "[\(normalizedHost)]"
+    } else {
+        renderedHost = normalizedHost
+    }
+    let explicitPort = components.port.map { ":\($0)" } ?? ""
+    let parsedOrigin = "https://\(renderedHost)\(explicitPort)"
+    let normalizedInput = value.hasSuffix("/") ? String(value.dropLast()) : value
+    guard normalizedInput.lowercased() == parsedOrigin else {
+        throw ReceiptIssuerError("\(check) check failed: invalid HTTPS origin")
+    }
+
+    // HTTPS's default port is part of the same canonical origin and is omitted.
+    let canonicalPort = components.port == 443 ? "" : explicitPort
+    return "https://\(renderedHost)\(canonicalPort)"
+}
+
+private func requireTrafficBindings(_ options: ReceiptVerificationOptions) throws {
+    guard options.requireBindings else { return }
+    let missingRequest = options.requestBody == nil
+    let missingResponse = options.responseBody == nil && options.responseStream == nil
+    if missingRequest && missingResponse {
+        throw MissingBindingError(
+            "receipt binding check failed: missing requestBody and responseBody or responseStream"
+        )
+    }
+    if missingRequest {
+        throw MissingBindingError("receipt binding check failed: missing requestBody")
+    }
+    if missingResponse {
+        throw MissingBindingError(
+            "receipt binding check failed: missing responseBody or responseStream"
+        )
+    }
+}
+
 private func digestClaim(_ object: [String: Any], name: String, response: Bool) throws -> ReceiptHashClaims {
     guard object["alg"] as? String == "sha256" else {
         throw ReceiptHashError("\(name).alg check failed: expected 'sha256'")
@@ -826,6 +899,12 @@ private func verifyAttestation(
 
 /// Verifies a compact or flattened inference receipt and returns its typed v1 claims.
 ///
+/// `expectedIssuer` pins the signed issuer to a canonical HTTPS origin. Request
+/// bytes and exactly one response representation are required by default so
+/// the signed digests are bound to the caller's traffic. Set
+/// `ReceiptVerificationOptions.requireBindings` to `false` only for deliberate
+/// signature-only or partial-binding inspection.
+///
 /// Compact receipts cannot carry their attestation document. Supply its exact
 /// bytes as `ReceiptVerificationOptions.attestation` to check the pinned digest
 /// and verify the signing-key binding. `requireAttestation: false` remains an
@@ -839,18 +918,21 @@ private func verifyAttestation(
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: String,
+    expectedIssuer: String,
     options: ReceiptVerificationOptions = ReceiptVerificationOptions()
 ) async throws -> ReceiptClaims {
-    try await verifyReceipt(Data(receipt.utf8), options: options)
+    try await verifyReceipt(Data(receipt.utf8), expectedIssuer: expectedIssuer, options: options)
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: Data,
+    expectedIssuer: String,
     options: ReceiptVerificationOptions = ReceiptVerificationOptions()
 ) async throws -> ReceiptClaims {
     try await verifyReceipt(
         receipt,
+        expectedIssuer: expectedIssuer,
         options: options,
         gcpAttestationVerifier: { document, commitment in
             try await verifyGCPAttestation(document, commitment: commitment)
@@ -861,6 +943,7 @@ public func verifyReceipt(
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: FlattenedReceiptJWS,
+    expectedIssuer: String,
     options: ReceiptVerificationOptions = ReceiptVerificationOptions()
 ) async throws -> ReceiptClaims {
     let object: [String: Any] = [
@@ -869,12 +952,13 @@ public func verifyReceipt(
         "signature": receipt.signature,
     ]
     let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-    return try await verifyReceipt(data, options: options)
+    return try await verifyReceipt(data, expectedIssuer: expectedIssuer, options: options)
 }
 
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: [String: Any],
+    expectedIssuer: String,
     options: ReceiptVerificationOptions = ReceiptVerificationOptions()
 ) async throws -> ReceiptClaims {
     let data: Data
@@ -885,17 +969,20 @@ public func verifyReceipt(
             "JWS structure check failed: flattened JWS is not JSON-serializable: \(error.localizedDescription)"
         )
     }
-    return try await verifyReceipt(data, options: options)
+    return try await verifyReceipt(data, expectedIssuer: expectedIssuer, options: options)
 }
 
-// Internal injection point used only by frozen-vector tests whose signed
-// protected headers deliberately contain placeholder GCP evidence.
+// Internal injection point used by receipt tests to keep verification material
+// deterministic and to instrument attestation-network behavior.
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 func verifyReceipt(
     _ receipt: Data,
+    expectedIssuer: String,
     options: ReceiptVerificationOptions,
     gcpAttestationVerifier: @escaping ReceiptGCPAttestationVerifier
 ) async throws -> ReceiptClaims {
+    try requireTrafficBindings(options)
+    let canonicalExpectedIssuer = try canonicalHTTPSOrigin(expectedIssuer, check: "expectedIssuer")
     let envelope = try parseEnvelope(receipt)
     let (header, publicKey) = try parseHeader(envelope)
     let payloadData = try verifySignature(envelope, publicKey: publicKey)
@@ -907,6 +994,15 @@ func verifyReceipt(
     guard let rv = jsonInteger(payload["rv"]), rv == 1 else {
         throw ReceiptClaimsError("rv claim check failed: expected integer 1")
     }
+
+    let iss = try requiredString(payload, "iss")
+    let canonicalIssuer = try canonicalHTTPSOrigin(iss, check: "iss claim")
+    guard constantTimeEqual(canonicalIssuer, canonicalExpectedIssuer) else {
+        throw ReceiptIssuerError(
+            "iss claim check failed: expected '\(canonicalExpectedIssuer)', got '\(canonicalIssuer)'"
+        )
+    }
+
     guard let iat = jsonInteger(payload["iat"]) else {
         throw ReceiptTimeError("iat claim check failed: expected an integer")
     }
@@ -930,7 +1026,6 @@ func verifyReceipt(
         }
     }
 
-    let iss = try requiredString(payload, "iss")
     let jti = try requiredString(payload, "jti")
     let gen = try optionalString(payload, "gen")
     let route = try requiredString(payload, "route")
@@ -1138,9 +1233,11 @@ public final class ReceiptCapture: @unchecked Sendable {
 
     @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
     public func verify(
+        expectedIssuer: String,
         options: ReceiptVerificationOptions = ReceiptVerificationOptions()
     ) async throws -> ReceiptClaims {
         try await verify(
+            expectedIssuer: expectedIssuer,
             options: options,
             gcpAttestationVerifier: { document, commitment in
                 try await verifyGCPAttestation(document, commitment: commitment)
@@ -1150,6 +1247,7 @@ public final class ReceiptCapture: @unchecked Sendable {
 
     @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
     func verify(
+        expectedIssuer: String,
         options: ReceiptVerificationOptions,
         gcpAttestationVerifier: @escaping ReceiptGCPAttestationVerifier
     ) async throws -> ReceiptClaims {
@@ -1169,6 +1267,7 @@ public final class ReceiptCapture: @unchecked Sendable {
         }
         return try await verifyReceipt(
             data,
+            expectedIssuer: expectedIssuer,
             options: capturedOptions,
             gcpAttestationVerifier: gcpAttestationVerifier
         )

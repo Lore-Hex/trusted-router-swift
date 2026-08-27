@@ -1,10 +1,15 @@
 import XCTest
 @testable import TrustedRouter
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 #if canImport(CryptoKit)
 import CryptoKit
 
 final class ReceiptVerificationTests: XCTestCase {
+    private let expectedIssuer = "https://api.trustedrouter.com"
     private let fixedNow: TimeInterval = 1_756_224_060
     private let requestBody = Data("request".utf8)
     private let responseBody = Data("response".utf8)
@@ -34,6 +39,7 @@ final class ReceiptVerificationTests: XCTestCase {
             // Production calls always use verifyReceiptKeyAttestation instead.
             let verified = try await verifyReceipt(
                 receipt,
+                expectedIssuer: expectedIssuer,
                 options: options,
                 gcpAttestationVerifier: { _, _ in }
             )
@@ -46,6 +52,7 @@ final class ReceiptVerificationTests: XCTestCase {
         let generated = try makeReceipt(claims: baseClaims())
         let verified = try await verifyReceipt(
             generated.raw,
+            expectedIssuer: expectedIssuer,
             options: ReceiptVerificationOptions(
                 requestBody: requestBody,
                 responseBody: responseBody,
@@ -58,6 +65,152 @@ final class ReceiptVerificationTests: XCTestCase {
         XCTAssertEqual(verified.model.provider, "provider")
         XCTAssertEqual(verified.attestationStatus, .unverifiedByThisSDK)
         XCTAssertEqual(verified.attestation, verified.attestationStatus)
+    }
+
+    func testBindingsAreRequiredByDefaultAndCanBeExplicitlyDisabled() async throws {
+        let generated = try makeReceipt(claims: baseClaims())
+
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: fixedNow, requireAttestation: false
+                )
+            )
+            XCTFail("expected missing binding failure")
+        } catch let error as MissingBindingError {
+            XCTAssertTrue(
+                error.message.contains("missing requestBody and responseBody or responseStream"),
+                error.message
+            )
+        }
+
+        let verified = try await verifyReceipt(
+            generated.raw,
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                now: fixedNow, requireAttestation: false, requireBindings: false
+            )
+        )
+        XCTAssertEqual(verified.iss, expectedIssuer)
+    }
+
+    func testPartialBindingsFailClosedByDefault() async throws {
+        let generated = try makeReceipt(claims: baseClaims())
+
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    requestBody: requestBody, now: fixedNow, requireAttestation: false
+                )
+            )
+            XCTFail("expected missing response binding failure")
+        } catch let error as MissingBindingError {
+            XCTAssertTrue(
+                error.message.contains("missing responseBody or responseStream"), error.message
+            )
+        }
+
+        do {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    responseBody: responseBody, now: fixedNow, requireAttestation: false
+                )
+            )
+            XCTFail("expected missing request binding failure")
+        } catch let error as MissingBindingError {
+            XCTAssertTrue(error.message.contains("missing requestBody"), error.message)
+        }
+    }
+
+    func testExpectedIssuerExactMatchPassesAndMismatchIsTyped() async throws {
+        let generated = try makeReceipt(claims: baseClaims())
+        let verified = try await verifyReceipt(
+            generated.raw,
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                now: fixedNow, requireAttestation: false, requireBindings: false
+            )
+        )
+        XCTAssertEqual(verified.iss, expectedIssuer)
+
+        await assertReceiptError(ReceiptIssuerError.self) {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: "https://other.example",
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                )
+            )
+        }
+    }
+
+    func testIssuerOriginNormalization() async throws {
+        let cases = [
+            ("https://API.TrustedRouter.COM/", "HTTPS://api.trustedrouter.com"),
+            ("https://API.TrustedRouter.COM:443/", "https://api.trustedrouter.com"),
+            ("https://API.TrustedRouter.COM:8443/", "https://api.trustedrouter.com:8443"),
+            ("https://[2001:DB8::1]:443/", "HTTPS://[2001:db8::1]"),
+        ]
+        for (receiptIssuer, pinnedIssuer) in cases {
+            var claims = baseClaims()
+            claims["iss"] = receiptIssuer
+            let generated = try makeReceipt(claims: claims)
+            let verified = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: pinnedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: fixedNow, requireAttestation: false, requireBindings: false
+                )
+            )
+            XCTAssertEqual(verified.iss, receiptIssuer)
+        }
+    }
+
+    func testIssuerPortMustMatchAfterNormalization() async throws {
+        var claims = baseClaims()
+        claims["iss"] = "\(expectedIssuer):8443"
+        let generated = try makeReceipt(claims: claims)
+        await assertReceiptError(ReceiptIssuerError.self) {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: self.expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                )
+            )
+        }
+    }
+
+    func testReceiptAndExpectedIssuerMustUseHTTPS() async throws {
+        var claims = baseClaims()
+        claims["iss"] = "http://api.trustedrouter.com"
+        let generated = try makeReceipt(claims: claims)
+        await assertReceiptError(ReceiptIssuerError.self) {
+            _ = try await verifyReceipt(
+                generated.raw,
+                expectedIssuer: self.expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                )
+            )
+        }
+
+        let valid = try makeReceipt(claims: baseClaims())
+        await assertReceiptError(ReceiptIssuerError.self) {
+            _ = try await verifyReceipt(
+                valid.raw,
+                expectedIssuer: "http://api.trustedrouter.com",
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                )
+            )
+        }
     }
 
     func testFlippedPayloadByteFailsSignature() async throws {
@@ -154,10 +307,12 @@ final class ReceiptVerificationTests: XCTestCase {
         await assertReceiptError(ReceiptTimeError.self) {
             _ = try await verifyReceipt(
                 generated.raw,
+                expectedIssuer: self.expectedIssuer,
                 options: ReceiptVerificationOptions(
                     maxAgeSeconds: 0.5,
                     now: self.fixedNow,
-                    requireAttestation: false
+                    requireAttestation: false,
+                    requireBindings: false
                 )
             )
         }
@@ -179,8 +334,10 @@ final class ReceiptVerificationTests: XCTestCase {
         await assertReceiptError(ReceiptNonceError.self) {
             _ = try await verifyReceipt(
                 generated.raw,
+                expectedIssuer: self.expectedIssuer,
                 options: ReceiptVerificationOptions(
-                    expectedNonce: "different", now: self.fixedNow, requireAttestation: false
+                    expectedNonce: "different", now: self.fixedNow,
+                    requireAttestation: false, requireBindings: false
                 )
             )
         }
@@ -197,7 +354,10 @@ final class ReceiptVerificationTests: XCTestCase {
         await assertReceiptError(UnsupportedAttestationError.self) {
             _ = try await verifyReceipt(
                 generated.raw,
-                options: ReceiptVerificationOptions(now: self.fixedNow, requireAttestation: false),
+                expectedIssuer: self.expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                ),
                 gcpAttestationVerifier: { _, _ in }
             )
         }
@@ -210,7 +370,10 @@ final class ReceiptVerificationTests: XCTestCase {
         let recorder = CommitmentRecorder()
         let verified = try await verifyReceipt(
             generated.raw,
-            options: ReceiptVerificationOptions(now: fixedNow, requireAttestation: false),
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                now: fixedNow, requireAttestation: false, requireBindings: false
+            ),
             gcpAttestationVerifier: { document, commitment in
                 recorder.record(document: document, commitment: commitment)
             }
@@ -219,6 +382,61 @@ final class ReceiptVerificationTests: XCTestCase {
         XCTAssertEqual(recorder.document, Data("fixture.jwt.placeholder".utf8))
         XCTAssertEqual(recorder.commitment, expected)
         XCTAssertEqual(verified.attestationStatus, .verified)
+    }
+
+    func testReceiptIssuerIsNeverUsedToFetchVerificationMaterial() async throws {
+        let hostileIssuer = "https://evil.example"
+        let policy = AttestationPolicy(imageDigest: "sha256:abc123")
+        let key = Curve25519.Signing.PrivateKey()
+        let commitment = hash(keyCommitmentTestDomain + key.publicKey.rawRepresentation)
+        let document = try gcpKeyAttestation(nonces: [commitment.hexString])
+        var claims = baseClaims()
+        claims["iss"] = hostileIssuer
+        claims.removeValue(forKey: "att_sha256")
+        let generated = try makeReceipt(
+            claims: claims,
+            flattened: true,
+            headerUpdates: [
+                "att": try XCTUnwrap(String(data: document, encoding: .ascii)),
+            ],
+            key: key
+        )
+
+        let recorder = ReceiptRequestRecorder()
+        ReceiptVerificationURLProtocol.requestHandler = { request in
+            guard let url = request.url else {
+                throw URLError(.badURL)
+            }
+            recorder.append(url)
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil
+            )!
+            return (response, Data("{\"keys\":[]}".utf8))
+        }
+        defer { ReceiptVerificationURLProtocol.requestHandler = nil }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [ReceiptVerificationURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let verified = try await verifyReceipt(
+            generated.raw,
+            expectedIssuer: hostileIssuer,
+            options: ReceiptVerificationOptions(now: fixedNow, requireBindings: false),
+            gcpAttestationVerifier: { document, commitment in
+                try await verifyReceiptKeyAttestation(
+                    document: document,
+                    policy: policy,
+                    keyCommitmentHex: commitment.hexString,
+                    jwksUrl: GCPJwksURI,
+                    urlSession: session,
+                    signatureVerifier: { _, _, _, _ in }
+                )
+            }
+        )
+
+        XCTAssertEqual(verified.iss, hostileIssuer)
+        XCTAssertEqual(recorder.urls.map(\.absoluteString), [GCPJwksURI])
+        XCTAssertFalse(recorder.urls.contains { $0.host == "evil.example" })
     }
 
     func testReceiptKeyBindingAcceptsNonceSetMembershipButLiveBindingRejectsIt() async throws {
@@ -240,7 +458,8 @@ final class ReceiptVerificationTests: XCTestCase {
 
             let verified = try await verifyReceipt(
                 generated.raw,
-                options: ReceiptVerificationOptions(now: fixedNow),
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(now: fixedNow, requireBindings: false),
                 gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
             )
             XCTAssertEqual(verified.attestationStatus, .verified)
@@ -277,7 +496,8 @@ final class ReceiptVerificationTests: XCTestCase {
         do {
             _ = try await verifyReceipt(
                 generated.raw,
-                options: ReceiptVerificationOptions(now: fixedNow),
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(now: fixedNow, requireBindings: false),
                 gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
             )
             XCTFail("expected receipt key commitment failure")
@@ -301,7 +521,10 @@ final class ReceiptVerificationTests: XCTestCase {
 
         let verified = try await verifyReceipt(
             generated.raw,
-            options: ReceiptVerificationOptions(now: fixedNow, attestation: document),
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                now: fixedNow, attestation: document, requireBindings: false
+            ),
             gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
         )
         XCTAssertEqual(verified.attestationStatus, .verified)
@@ -311,7 +534,10 @@ final class ReceiptVerificationTests: XCTestCase {
         do {
             _ = try await verifyReceipt(
                 generated.raw,
-                options: ReceiptVerificationOptions(now: fixedNow, attestation: changed),
+                expectedIssuer: expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: fixedNow, attestation: changed, requireBindings: false
+                ),
                 gcpAttestationVerifier: mockedReceiptKeyVerifier(policy: policy)
             )
             XCTFail("expected compact attestation digest failure")
@@ -333,9 +559,11 @@ final class ReceiptVerificationTests: XCTestCase {
         do {
             _ = try await verifyReceipt(
                 generated.raw,
+                expectedIssuer: expectedIssuer,
                 options: ReceiptVerificationOptions(
                     now: fixedNow,
-                    attestation: document + Data("x".utf8)
+                    attestation: document + Data("x".utf8),
+                    requireBindings: false
                 ),
                 gcpAttestationVerifier: { _, _ in }
             )
@@ -351,7 +579,8 @@ final class ReceiptVerificationTests: XCTestCase {
         await assertReceiptError(MissingAttestationError.self) {
             _ = try await verifyReceipt(
                 compactReceipt.raw,
-                options: ReceiptVerificationOptions(now: self.fixedNow)
+                expectedIssuer: self.expectedIssuer,
+                options: ReceiptVerificationOptions(now: self.fixedNow, requireBindings: false)
             )
         }
 
@@ -363,7 +592,10 @@ final class ReceiptVerificationTests: XCTestCase {
         await assertReceiptError(MissingAttestationError.self) {
             _ = try await verifyReceipt(
                 flattened.raw,
-                options: ReceiptVerificationOptions(now: self.fixedNow, requireAttestation: false),
+                expectedIssuer: self.expectedIssuer,
+                options: ReceiptVerificationOptions(
+                    now: self.fixedNow, requireAttestation: false, requireBindings: false
+                ),
                 gcpAttestationVerifier: { _, _ in }
             )
         }
@@ -413,7 +645,8 @@ final class ReceiptVerificationTests: XCTestCase {
         XCTAssertEqual(capture.capturedBytes, generated.stream)
         XCTAssertEqual(capture.receipt, generated.receipt.envelope)
         let verified = try await capture.verify(
-            options: ReceiptVerificationOptions(now: fixedNow),
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(requestBody: requestBody, now: fixedNow),
             gcpAttestationVerifier: { _, _ in }
         )
         XCTAssertEqual(verified.jti, "chatcmpl-test")
@@ -422,14 +655,20 @@ final class ReceiptVerificationTests: XCTestCase {
     private func verifyWithoutAttestation(_ receipt: Data) async throws -> ReceiptClaims {
         try await verifyReceipt(
             receipt,
-            options: ReceiptVerificationOptions(now: fixedNow, requireAttestation: false)
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                now: fixedNow, requireAttestation: false, requireBindings: false
+            )
         )
     }
 
     private func verifyStream(_ receipt: Data, stream: Data) async throws -> ReceiptClaims {
         try await verifyReceipt(
             receipt,
-            options: ReceiptVerificationOptions(responseStream: stream, now: fixedNow),
+            expectedIssuer: expectedIssuer,
+            options: ReceiptVerificationOptions(
+                requestBody: requestBody, responseStream: stream, now: fixedNow
+            ),
             gcpAttestationVerifier: { _, _ in }
         )
     }
@@ -694,6 +933,46 @@ private final class CommitmentRecorder: @unchecked Sendable {
         savedDocument = document
         savedCommitment = commitment
     }
+}
+
+private final class ReceiptRequestRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var savedURLs: [URL] = []
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return savedURLs
+    }
+
+    func append(_ url: URL) {
+        lock.lock()
+        savedURLs.append(url)
+        lock.unlock()
+    }
+}
+
+private final class ReceiptVerificationURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestHandler:
+        ((URLRequest) throws -> (HTTPURLResponse, Data))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.requestHandler else { throw URLError(.badServerResponse) }
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
 }
 
 #else

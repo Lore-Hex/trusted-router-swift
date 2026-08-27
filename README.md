@@ -124,7 +124,8 @@ and `subagentTool`.
   but does **not** provide bounded-memory live network streaming.
 - **Attestation Verification**: Verifies the Confidential Space JWT using `CryptoKit`/`Security`.
 - **Inference receipt verification**: Verifies compact and flattened v1 JWS
-  receipts, exact request/response hashes, strict SSE hash domains, nonce/time
+  receipts against a caller-pinned HTTPS issuer and, by default, exact
+  request/response bytes; also checks strict SSE hash domains, nonce/time
   bounds, upstream windows, and embedded GCP key commitments. Ed25519 uses
   `CryptoKit.Curve25519.Signing` (available on macOS 10.15+ and iOS 13+; the
   package's currently declared deployment targets are higher).
@@ -137,6 +138,29 @@ and `subagentTool`.
   Foundation's default handling. Delegate-based private-CA trust, certificate
   pinning, mTLS/client-certificate selection, and authentication customization
   are therefore intentionally not inherited by SDK requests.
+
+## Receipt verification
+
+Receipt verification requires the expected signed issuer and both traffic
+bindings by default, so a valid signature cannot be mistaken for proof about
+different traffic:
+
+```swift
+let claims = try await verifyReceipt(
+    receiptJWS,
+    expectedIssuer: "https://api.trustedrouter.com",
+    options: ReceiptVerificationOptions(
+        requestBody: serializedRequest,
+        responseBody: responseBytes,
+        expectedNonce: requestNonce
+    )
+)
+```
+
+For deliberate signature-only inspection, pass `requireBindings: false`.
+For compact receipts whose pinned attestation document is unavailable,
+separately pass `requireAttestation: false`; both escape hatches must be
+explicit.
 
 ### Receipt attestation documents
 

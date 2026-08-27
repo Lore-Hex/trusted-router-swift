@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Receipt verification now fails closed: every verification requires a
+  caller-pinned canonical HTTPS issuer, and request plus response bindings are
+  required by default. `requireBindings: false` is the explicit
+  signature-only or partial-binding escape hatch. Missing traffic bindings and
+  issuer failures have dedicated typed errors.
+
 ## 0.8.0 — 2026-08-22
 
 - Added the `/v1/client-events` beacon channel (client telemetry contract v1
