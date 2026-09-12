@@ -194,6 +194,43 @@ enum SHA256Pure {
 
 // MARK: - OAuth models
 
+/// A sourced, exact verified-email domain match, not proof of employment or endorsement.
+public struct CompanyAffiliation: Codable, Sendable, Equatable {
+    public var companyName: String
+    public var fundingOrganization: String
+    public var relationship: String
+    public var domain: String
+    public var foundingYear: Int?
+    public var sourceURL: String
+    public var checkedAt: String
+    public var matchMethod: String
+
+    enum CodingKeys: String, CodingKey {
+        case relationship, domain
+        case companyName = "company_name"
+        case fundingOrganization = "funding_organization"
+        case foundingYear = "founding_year"
+        case sourceURL = "source_url"
+        case checkedAt = "checked_at"
+        case matchMethod = "match_method"
+    }
+
+    public init(
+        companyName: String, fundingOrganization: String, relationship: String,
+        domain: String, foundingYear: Int? = nil, sourceURL: String,
+        checkedAt: String, matchMethod: String
+    ) {
+        self.companyName = companyName
+        self.fundingOrganization = fundingOrganization
+        self.relationship = relationship
+        self.domain = domain
+        self.foundingYear = foundingYear
+        self.sourceURL = sourceURL
+        self.checkedAt = checkedAt
+        self.matchMethod = matchMethod
+    }
+}
+
 /// Verified identity attached to a delegated key, as returned by
 /// `/auth/keys` (`identity`) and embedded in `/auth/userinfo`.
 public struct OAuthIdentity: Codable, Sendable, Equatable {
@@ -201,18 +238,21 @@ public struct OAuthIdentity: Codable, Sendable, Equatable {
     public var email: String?
     public var emailVerified: Bool?
     public var walletAddress: String?
+    public var companyAffiliations: [CompanyAffiliation]?
 
     enum CodingKeys: String, CodingKey {
         case sub, email
         case emailVerified = "email_verified"
         case walletAddress = "wallet_address"
+        case companyAffiliations = "company_affiliations"
     }
 
-    public init(sub: String, email: String? = nil, emailVerified: Bool? = nil, walletAddress: String? = nil) {
+    public init(sub: String, email: String? = nil, emailVerified: Bool? = nil, walletAddress: String? = nil, companyAffiliations: [CompanyAffiliation]? = nil) {
         self.sub = sub
         self.email = email
         self.emailVerified = emailVerified
         self.walletAddress = walletAddress
+        self.companyAffiliations = companyAffiliations
     }
 }
 
@@ -252,6 +292,7 @@ public struct UserInfo: Codable, Sendable, Equatable {
     /// ISO-8601 creation timestamp string (the backend returns a string here,
     /// not an epoch number).
     public var createdAt: String?
+    public var companyAffiliations: [CompanyAffiliation]?
 
     enum CodingKeys: String, CodingKey {
         case sub, email
@@ -259,6 +300,7 @@ public struct UserInfo: Codable, Sendable, Equatable {
         case walletAddress = "wallet_address"
         case workspaceId = "workspace_id"
         case createdAt = "created_at"
+        case companyAffiliations = "company_affiliations"
     }
 
     public init(
@@ -267,7 +309,8 @@ public struct UserInfo: Codable, Sendable, Equatable {
         emailVerified: Bool? = nil,
         walletAddress: String? = nil,
         workspaceId: String? = nil,
-        createdAt: String? = nil
+        createdAt: String? = nil,
+        companyAffiliations: [CompanyAffiliation]? = nil
     ) {
         self.sub = sub
         self.email = email
@@ -275,6 +318,7 @@ public struct UserInfo: Codable, Sendable, Equatable {
         self.walletAddress = walletAddress
         self.workspaceId = workspaceId
         self.createdAt = createdAt
+        self.companyAffiliations = companyAffiliations
     }
 }
 

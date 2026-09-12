@@ -225,6 +225,26 @@ final class OAuthTests: XCTestCase {
         XCTAssertNil(resp.data.workspaceId)
     }
 
+    func testCompanyAffiliationsSurviveIdentityAndUserInfoDecoding() throws {
+        let json = #"""
+        {"sub":"user_1","company_affiliations":[{
+          "company_name":"Example Company","funding_organization":"Y Combinator",
+          "relationship":"accelerator","domain":"example.com","founding_year":null,
+          "source_url":"https://www.ycombinator.com/companies/example",
+          "checked_at":"2026-09-12T00:00:00+00:00","match_method":"verified_email_domain"
+        }]}
+        """#
+        let data = Data(json.utf8)
+        let identity = try JSONDecoder().decode(OAuthIdentity.self, from: data)
+        let userInfo = try JSONDecoder().decode(UserInfo.self, from: data)
+        for encoded in [try JSONEncoder().encode(identity), try JSONEncoder().encode(userInfo)] {
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            let affiliations = try XCTUnwrap(object["company_affiliations"] as? [[String: Any]])
+            XCTAssertEqual(affiliations.first?["funding_organization"] as? String, "Y Combinator")
+            XCTAssertEqual(affiliations.first?["domain"] as? String, "example.com")
+        }
+    }
+
     // MARK: - Callback parsing + state validation (Apple platforms only)
 
     #if canImport(AuthenticationServices)
