@@ -203,6 +203,12 @@ deployment, a test server, a regional pin — is never rewritten. Pass
 
 ## Sign in with TrustedRouter
 
+`OAuthIdentity` and `UserInfo` expose optional `companyAffiliations` arrays of
+`CompanyAffiliation`. Each includes the company, funding organization, domain,
+optional founding year, and source evidence. These are exact verified-email
+domain matches to company directories, not employment verification or investor
+endorsement. Missing claims and null founding years are normal.
+
 Let users "bring their own TrustedRouter account" via the OAuth **PKCE** flow,
 which mints a user-scoped key so LLM calls are billed to *that user's* credits.
 On iOS/macOS, `TrustedRouterOAuth().authenticate(...)` runs the whole flow in an
