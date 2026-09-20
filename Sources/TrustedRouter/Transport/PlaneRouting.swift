@@ -13,7 +13,9 @@ import FoundationNetworking
 /// Request routing plane for methods that need to choose between inference
 /// and control/metadata hosts.
 public enum TrustedRouterRequestPlane: Sendable {
+    /// Model inference traffic.
     case inference
+    /// Catalog, account, and configuration traffic.
     case control
 }
 

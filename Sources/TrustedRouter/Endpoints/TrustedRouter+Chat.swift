@@ -70,6 +70,7 @@ extension TrustedRouter {
         return collectCompletion(chunks: chunks)
     }
 
+    /// Starts a chat request and returns decoded SSE completion chunks.
     @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
     public func chatCompletionsChunks(
         model: String = TrustedRouterConstants.autoModel,

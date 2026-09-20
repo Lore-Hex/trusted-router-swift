@@ -18,17 +18,24 @@ import FoundationNetworking
 ///
 /// The client is `Sendable` and safe to share across actors.
 public final class TrustedRouter: Sendable {
+    /// Bearer API key used to authenticate requests.
     public let apiKey: String?
+    /// Base URL for inference requests.
     public let baseUrl: String
+    /// Base URL for catalog and account requests.
     public let controlBaseURL: String
+    /// Session whose configuration supplies the request transport policy.
     public let urlSession: URLSession
     /// Private send session cloned from the caller's configuration without
     /// its ambient authentication delegate or credential store. Keeping the
     /// public property unchanged preserves caller ownership/introspection.
     let transportURLSession: URLSession
     let credentialFreeURLSession: URLSession
+    /// Default HTTP headers applied to requests.
     public let defaultHeaders: [String: String]
+    /// Maximum number of retries after the initial attempt.
     public let maxRetries: Int
+    /// Whether eligible inference failures may try another gateway.
     public let regionalFailover: Bool
     /// Whether this client emits the content-free `x-tr-client` reliability
     /// header (client-telemetry contract v1 §6.3). Resolved once at
@@ -39,6 +46,7 @@ public final class TrustedRouter: Sendable {
     /// call. Nil while telemetry is disabled; construction never starts a
     /// worker or opens a network connection.
     let telemetryReporterStore: TelemetryReporterStore?
+    /// Workspace identifier used to scope the request.
     public let workspaceId: String?
     let regionalEndpointSelector: RegionalEndpointSelector?
     /// The inference hosts used when the regional selector is off: the primary
@@ -49,6 +57,7 @@ public final class TrustedRouter: Sendable {
     /// well-known TrustedRouter endpoint. See Transport/CredentialScope.swift.
     let credentialHostAllowlist: CredentialHostAllowlist
 
+    /// Creates a `TrustedRouter` with the supplied values.
     public init(options: TrustedRouterOptions = TrustedRouterOptions()) throws {
         // x-tr-client is SDK-RESERVED (client-telemetry contract v1 §6.1): only
         // the SDK's own recorder may set a value, on every path. Every header

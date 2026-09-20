@@ -8,6 +8,7 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
+    /// Creates a billing checkout session.
     public func billingCheckout(
         amount: Any,
         paymentMethod: String? = nil,
@@ -29,10 +30,12 @@ extension TrustedRouter {
         )
     }
 
+    /// Fetches the current authentication session.
     public func authSession() async throws -> AuthSessionResponse {
         return try await request(method: "GET", path: "/auth/session", plane: .control)
     }
 
+    /// Ends the current authentication session.
     public func logout() async throws -> EmptyResponse {
         return try await request(
             method: "POST", path: "/auth/logout",
@@ -40,6 +43,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Fetches account activity using the supplied query parameters.
     public func activity(params: [String: Any] = [:]) async throws -> ActivityResponse {
         var queryItems: [URLQueryItem] = []
         for (key, value) in params {
@@ -53,6 +57,7 @@ extension TrustedRouter {
         return try await request(method: "GET", path: path, plane: .control)
     }
 
+    /// Fetches a status document and requires a JSON object response.
     public func status(url: String = TrustedRouterConstants.defaultStatusURL) async throws -> [String: Any] {
         // The status page is a public, unauthenticated document, so this is a
         // single-shot request that carries none of the SDK-attached credential

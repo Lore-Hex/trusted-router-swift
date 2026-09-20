@@ -4,11 +4,15 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Typed s s e event data returned by the service.
 public struct SSEEvent: Sendable {
+    /// SSE event type, when supplied.
     public var event: String?
+    /// Concatenated SSE data lines, before JSON decoding.
     public var data: String
 }
 
+/// Asynchronous sequence of response bytes used by streaming APIs.
 public typealias TrustedRouterByteStream = AsyncThrowingStream<UInt8, Error>
 
 /// Pull cursor for the byte-to-frame layer. `AsyncThrowingStream(unfolding:)`
@@ -69,6 +73,7 @@ private final class SSEEventCursor: @unchecked Sendable {
     }
 }
 
+/// Parses server-sent events from a response byte stream.
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
 public enum SSEParser {
     /// Upper bound for one not-yet-delimited event. Prevents an untrusted
@@ -179,6 +184,7 @@ private final class TypedSSECursor<T: Decodable>: @unchecked Sendable {
     }
 }
 
+/// Decodes SSE events from the supplied byte stream.
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
 public func iterSseEvents<T: Decodable>(
     bytes: TrustedRouterByteStream,
@@ -285,6 +291,7 @@ private final class DictionarySSECursor: @unchecked Sendable {
     }
 }
 
+/// Decodes SSE events from the supplied byte stream.
 @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
 public func iterSseEvents(
     bytes: TrustedRouterByteStream

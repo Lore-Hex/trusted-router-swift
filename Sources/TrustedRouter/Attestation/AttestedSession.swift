@@ -5,15 +5,21 @@ import Foundation
 import Network
 import Security
 
+/// Gateway connection and its verified TLS-bound attestation.
 public struct GatewaySession: Sendable {
+    /// Attestation evidence associated with this value.
     public let attestation: GatewayAttestation
+    /// Verified gateway network connection.
     public let connection: NWConnection
+    /// TLS exporter bytes used to bind attestation to the connection.
     public let exporter: Data
+    /// DER-encoded leaf certificate from the gateway connection.
     public let leafDER: Data
 
     fileprivate let reader: AttestedHTTP1Reader
 }
 
+/// Connects to a gateway and verifies the attestation bound to its TLS session.
 public func verifyGatewaySession(
     baseURL: String,
     policy: AttestationPolicy,
@@ -71,6 +77,7 @@ public func verifyGatewaySession(
     }
 }
 
+/// Fetches fresh attestation evidence over an existing gateway session.
 public func fetchAttestationAgain(_ session: GatewaySession, timeout: TimeInterval = 15) async throws -> Data {
     try await session.reader.fetchAttestation(nonceHex: nil, timeout: timeout)
 }
@@ -408,8 +415,10 @@ private func leafCertificateDER(from metadata: sec_protocol_metadata_t) throws -
 
 #else
 
+/// Placeholder for attested sessions on platforms without Network.framework.
 public struct GatewaySession: Sendable {}
 
+/// Throws because TLS-bound gateway sessions require Network.framework.
 public func verifyGatewaySession(
     baseURL: String,
     policy: AttestationPolicy,
@@ -423,6 +432,7 @@ public func verifyGatewaySession(
     )
 }
 
+/// Throws because TLS-bound gateway sessions require Network.framework.
 public func fetchAttestationAgain(_ session: GatewaySession, timeout: TimeInterval = 15) async throws -> Data {
     throw AttestationVerificationError(
         "G6 attested sessions are not supported on this platform (needs Network.framework)"

@@ -9,8 +9,10 @@ import FoundationNetworking
 
 /// JSON-serializable provider routing, privacy, and pricing preferences.
 public struct ProviderPreferences {
+    /// Wire representation of the provider preferences.
     public let value: [String: Any]
 
+    /// Creates a `ProviderPreferences` with the supplied values.
     public init(
         order: [String]? = nil,
         only: [String]? = nil,
@@ -41,14 +43,17 @@ public struct ProviderPreferences {
         value = result
     }
 
+    /// Requires zero data retention and disallows data collection.
     public static var zeroDataRetention: ProviderPreferences {
         ProviderPreferences(dataCollection: "deny", minimumPrivacy: "zdr")
     }
 
+    /// Requires confidential processing and disallows data collection.
     public static var confidential: ProviderPreferences {
         ProviderPreferences(dataCollection: "deny", minimumPrivacy: "confidential")
     }
 
+    /// Restricts routing to US provider jurisdiction.
     public static var unitedStates: ProviderPreferences {
         ProviderPreferences(jurisdiction: "us")
     }
@@ -76,12 +81,19 @@ func bodyWithProvider(
 /// 429 responses and, when `regionalFailover` is enabled, 502/503/504
 /// responses and transport errors.
 public struct TrustedRouterOptions {
+    /// Bearer API key used to authenticate requests.
     public var apiKey: String?
+    /// Base URL for inference requests.
     public var baseUrl: String?
+    /// Base URL for catalog and account requests.
     public var controlBaseURL: String?
+    /// Session whose configuration supplies the request transport policy.
     public var urlSession: URLSession
+    /// Default HTTP headers applied to requests.
     public var headers: [String: String]
+    /// Workspace identifier used to scope the request.
     public var workspaceId: String?
+    /// Maximum number of retries after the initial attempt.
     public var maxRetries: Int
     /// Retry eligible inference failures across the ranked regional gateways.
     public var regionalFailover: Bool
@@ -98,8 +110,10 @@ public struct TrustedRouterOptions {
     /// Nil enables affinity for URLSession.shared and disables it for an
     /// injected session. Set explicitly to override that safe default.
     public var regionalAffinity: Bool?
+    /// Timeout in seconds for each regional health probe.
     public var regionProbeTimeout: TimeInterval
 
+    /// Creates a `TrustedRouterOptions` with the supplied values.
     public init(
         apiKey: String? = nil,
         baseUrl: String? = nil,
@@ -151,12 +165,18 @@ public struct TrustedRouterOptions {
 /// `controlBaseURL` is that host, or pass the header yourself in
 /// `extraHeaders` — an explicitly named header is never withheld.
 public struct PerCallOptions {
+    /// Bearer API key used to authenticate requests.
     public var apiKey: String?
+    /// Additional HTTP headers for this call.
     public var extraHeaders: [String: String]?
+    /// Workspace identifier used to scope the request.
     public var workspaceId: String?
+    /// Stable key used to deduplicate retried requests.
     public var idempotencyKey: String?
+    /// Request timeout in seconds.
     public var timeout: TimeInterval?
 
+    /// Creates a `PerCallOptions` with the supplied values.
     public init(
         apiKey: String? = nil,
         extraHeaders: [String: String]? = nil,

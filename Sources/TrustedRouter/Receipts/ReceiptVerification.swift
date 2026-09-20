@@ -8,95 +8,154 @@ import CryptoKit
 // ordinary SDK SSE parser is permissive for application streams; receipts use
 // a stricter parser because their hash domains depend on exact wire fields.
 
+/// Failure raised when receipt verification cannot complete.
 public class ReceiptVerificationError: Error, LocalizedError, CustomStringConvertible, @unchecked Sendable {
+    /// Human-readable explanation of the verification failure.
     public let message: String
 
+    /// Creates a `ReceiptVerificationError` with the supplied values.
     public required init(_ message: String) {
         self.message = message
     }
 
+    /// Human-readable explanation suitable for error presentation.
     public var errorDescription: String? { message }
+    /// Textual representation of this error.
     public var description: String { message }
 }
 
+/// Failure raised when receipt structure verification cannot complete.
 public final class ReceiptStructureError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when receipt header verification cannot complete.
 public final class ReceiptHeaderError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when receipt signature verification cannot complete.
 public final class ReceiptSignatureError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when receipt claims verification cannot complete.
 public class ReceiptClaimsError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when required traffic bindings are missing.
 public final class MissingBindingError: ReceiptClaimsError, @unchecked Sendable {}
+/// Failure raised when receipt issuer verification cannot complete.
 public final class ReceiptIssuerError: ReceiptClaimsError, @unchecked Sendable {}
+/// Failure raised when receipt time verification cannot complete.
 public final class ReceiptTimeError: ReceiptClaimsError, @unchecked Sendable {}
+/// Failure raised when receipt nonce verification cannot complete.
 public final class ReceiptNonceError: ReceiptClaimsError, @unchecked Sendable {}
+/// Failure raised when receipt upstream verification cannot complete.
 public final class ReceiptUpstreamError: ReceiptClaimsError, @unchecked Sendable {}
+/// Failure raised when receipt hash verification cannot complete.
 public final class ReceiptHashError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when receipt attestation verification cannot complete.
 public class ReceiptAttestationError: ReceiptVerificationError, @unchecked Sendable {}
+/// Failure raised when required attestation evidence is missing.
 public final class MissingAttestationError: ReceiptAttestationError, @unchecked Sendable {}
+/// Failure raised when the attestation format or platform is unsupported.
 public final class UnsupportedAttestationError: ReceiptAttestationError, @unchecked Sendable {}
 
+/// Typed receipt hash claims data returned by the service.
 public struct ReceiptHashClaims: Sendable, Equatable {
+    /// Hash algorithm identifier.
     public let alg: String
+    /// Encoded content digest.
     public let hash: String
     // Invariant: public receipt API uses the wire field name of.
-    // swiftlint:disable:next identifier_name
-    public let of: String
+    /// Hash domain identifying the bytes covered.
+    public let of: String // swiftlint:disable:this identifier_name
+    /// Number of stream events covered by the digest, when present.
     public let events: Int?
 }
 
+/// Typed receipt model claims data returned by the service.
 public struct ReceiptModelClaims: Sendable, Equatable {
+    /// Model identifier requested by the caller.
     public let requested: String
+    /// Model identifier selected by routing.
     public let selected: String
+    /// Provider identifier.
     public let provider: String
+    /// Destination endpoint.
     public let endpoint: String
 }
 
+/// Typed receipt upstream claims data returned by the service.
 public struct ReceiptUpstreamClaims: Sendable, Equatable {
+    /// Upstream assurance tier recorded in the receipt.
     public let tier: String
+    /// Upstream verification policy identifier.
     public let policy: String?
+    /// Upstream verification time in Unix seconds.
     public let verifiedAt: Int?
+    /// Upstream verification expiration time in Unix seconds.
     public let verificationExpiresAt: Int?
+    /// SHA-256 digest binding the TLS certificate.
     public let certSha256: String?
 }
 
+/// Verification state of receipt attestation evidence.
 public enum ReceiptAttestationStatus: String, Sendable, Equatable {
+    /// The SDK successfully verified the attestation evidence.
     case verified
+    /// Attestation evidence has not been verified by this SDK.
     case unverifiedByThisSDK = "unverified_by_this_sdk"
 }
 
+/// Typed receipt claims data returned by the service.
 public struct ReceiptClaims: Sendable, Equatable {
     // Invariant: public receipt API uses the wire field name rv.
-    // swiftlint:disable:next identifier_name
-    public let rv: Int
+    /// Receipt format version.
+    public let rv: Int // swiftlint:disable:this identifier_name
+    /// Signed receipt issuer.
     public let iss: String
+    /// Receipt issue time in Unix seconds.
     public let iat: Int
+    /// Unique receipt identifier.
     public let jti: String
+    /// Receipt generation metadata retained as JSON.
     public let gen: String?
+    /// Nonce binding the evidence to a request.
     public let nonce: String?
+    /// Signed route information retained as JSON.
     public let route: String
+    /// Signed request hash binding.
     public let req: ReceiptHashClaims
+    /// Signed response hash binding.
     public let resp: ReceiptHashClaims
+    /// Model identifier associated with the request or response.
     public let model: ReceiptModelClaims
+    /// Signed evidence about upstream verification.
     public let upstream: ReceiptUpstreamClaims
+    /// SHA-256 digest pinning the external attestation document.
     public let attSha256: String?
+    /// Whether this SDK verified the attached attestation evidence.
     public let attestationStatus: ReceiptAttestationStatus
 
+    /// Attestation evidence associated with this value.
     public var attestation: ReceiptAttestationStatus { attestationStatus }
 }
 
+/// Traffic bindings, time bounds, and attestation requirements for receipt verification.
 public struct ReceiptVerificationOptions: Sendable {
+    /// Exact serialized request bytes used for receipt binding.
     public var requestBody: Data?
+    /// Exact response bytes used for receipt binding.
     public var responseBody: Data?
+    /// Exact SSE response bytes used for stream receipt binding.
     public var responseStream: Data?
+    /// Nonce that must match the signed receipt, when supplied.
     public var expectedNonce: String?
+    /// Maximum permitted receipt age in seconds.
     public var maxAgeSeconds: TimeInterval?
+    /// Clock override used for receipt time validation.
     public var now: TimeInterval?
     /// Exact GCP Confidential Space attestation JWT bytes for a compact
     /// receipt. The document must match the receipt's `att_sha256` claim.
     public var attestation: Data?
+    /// Whether receipt verification requires verified attestation evidence.
     public var requireAttestation: Bool
     /// Whether verification must bind both the request and one response
     /// representation to the receipt's signed digests.
     public var requireBindings: Bool
 
+    /// Creates a `ReceiptVerificationOptions` with the supplied values.
     public init(
         requestBody: Data? = nil,
         responseBody: Data? = nil,
@@ -122,10 +181,14 @@ public struct ReceiptVerificationOptions: Sendable {
 
 /// Value representation of a flattened inference-receipt JWS.
 public struct FlattenedReceiptJWS: Sendable, Equatable {
+    /// Base64url-encoded protected JWS header.
     public let protected: String
+    /// Base64url-encoded JWS payload.
     public let payload: String
+    /// Base64url-encoded JWS signature.
     public let signature: String
 
+    /// Creates a `FlattenedReceiptJWS` with the supplied values.
     public init(protected: String, payload: String, signature: String) {
         self.protected = protected
         self.payload = payload
@@ -929,6 +992,7 @@ public func verifyReceipt(
     try await verifyReceipt(Data(receipt.utf8), expectedIssuer: expectedIssuer, options: options)
 }
 
+/// Verifies a signed receipt against the pinned issuer and configured traffic bindings.
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: Data,
@@ -945,6 +1009,7 @@ public func verifyReceipt(
     )
 }
 
+/// Verifies a signed receipt against the pinned issuer and configured traffic bindings.
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: FlattenedReceiptJWS,
@@ -960,6 +1025,7 @@ public func verifyReceipt(
     return try await verifyReceipt(data, expectedIssuer: expectedIssuer, options: options)
 }
 
+/// Verifies a signed receipt against the pinned issuer and configured traffic bindings.
 @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
 public func verifyReceipt(
     _ receipt: [String: Any],
@@ -1180,25 +1246,30 @@ public final class ReceiptCapture: @unchecked Sendable {
     private var discoveredReceiptJSON: Data?
     private var configuredSource: TrustedRouterByteStream?
 
+    /// Creates a `ReceiptCapture` with the supplied values.
     public init() {}
 
+    /// Creates a `ReceiptCapture` with the supplied values.
     public convenience init(source: TrustedRouterByteStream) {
         self.init()
         configuredSource = source
     }
 
+    /// Exact response bytes accumulated by the capture.
     public var capturedBytes: Data {
         lock.lock()
         defer { lock.unlock() }
         return wire
     }
 
+    /// Receipt discovered in the captured response, if any.
     public var receipt: FlattenedReceiptJWS? {
         lock.lock()
         defer { lock.unlock() }
         return discoveredReceipt
     }
 
+    /// Appends response bytes to the receipt capture.
     public func append(_ bytes: Data) {
         lock.lock()
         defer { lock.unlock() }
@@ -1206,6 +1277,7 @@ public final class ReceiptCapture: @unchecked Sendable {
         refreshReceiptLocked()
     }
 
+    /// Wraps a byte stream and records bytes as the caller consumes them.
     public func stream(from source: TrustedRouterByteStream) -> TrustedRouterByteStream {
         let cursor = ReceiptCaptureCursor(source: source, capture: self)
         return AsyncThrowingStream(unfolding: {
@@ -1226,16 +1298,19 @@ public final class ReceiptCapture: @unchecked Sendable {
         return stream(from: source)
     }
 
+    /// Consumes a byte stream while capturing receipt evidence.
     public func consume(_ source: TrustedRouterByteStream) async throws {
         for try await byte in source {
             append(Data([byte]))
         }
     }
 
+    /// Consumes a byte stream while capturing receipt evidence.
     public func consume() async throws {
         for try await _ in stream() {}
     }
 
+    /// Verifies the captured receipt against the expected issuer and traffic bindings.
     @available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)
     public func verify(
         expectedIssuer: String,

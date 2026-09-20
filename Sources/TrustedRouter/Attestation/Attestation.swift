@@ -9,16 +9,26 @@ import CryptoKit
 import Security
 #endif
 
+/// Verified gateway attestation claims.
 public struct GatewayAttestation: Sendable {
+    /// SHA-256 digest binding the TLS certificate.
     public var certSha256: String
+    /// Container image digest.
     public var imageDigest: String
+    /// Container image reference.
     public var imageReference: String
+    /// Nonce binding the evidence to a request.
     public var nonce: String?
+    /// Expiration time for the token or delegated credential.
     public var expiresAt: Int?
+    /// Issuer of the attestation token.
     public var issuer: String?
+    /// Expected or attested token audience.
     public var audience: String
+    /// Original attestation claims retained as sendable JSON values.
     public var rawClaims: [String: SendableValue]
 
+    /// Creates a `GatewayAttestation` with the supplied values.
     public init(
         certSha256: String,
         imageDigest: String,
@@ -42,11 +52,17 @@ public struct GatewayAttestation: Sendable {
 
 /// A simple recursive Sendable value type to store JSON-like claims without [String: Any].
 public enum SendableValue: Sendable {
+    /// A JSON string value.
     case string(String)
+    /// A JSON number value.
     case number(Double)
+    /// A JSON boolean value.
     case bool(Bool)
+    /// An ordered collection of JSON values.
     case array([SendableValue])
+    /// A JSON object keyed by field name.
     case dictionary([String: SendableValue])
+    /// A JSON null value.
     case null
 
     static func from(any: Any?) -> SendableValue {
@@ -61,15 +77,24 @@ public enum SendableValue: Sendable {
     }
 }
 
+/// Image, audience, certificate, and debug constraints for gateway verification.
 public struct AttestationPolicy: Sendable {
+    /// Expected or attested token audience.
     public var audience: String
+    /// SHA-256 digest binding the TLS certificate.
     public var certSha256: String?
+    /// Container image digest.
     public var imageDigest: String?
+    /// Accepted container image digests.
     public var imageDigests: [String]
+    /// Container image reference.
     public var imageReference: String?
+    /// Accepted container image references.
     public var imageReferences: [String]
+    /// Whether debug-mode attestation is permitted; disabled by default.
     public var allowDebug: Bool
 
+    /// Creates an `AttestationPolicy` with the supplied values.
     public init(
         audience: String = "quill-cloud",
         certSha256: String? = nil,
@@ -104,17 +129,26 @@ public struct AttestationPolicy: Sendable {
     }
 }
 
+/// Failure raised when attestation verification cannot complete.
 public struct AttestationVerificationError: Error, LocalizedError, CustomStringConvertible {
+    /// Human-readable explanation of the verification failure.
     public let message: String
+    /// Creates an `AttestationVerificationError` with the supplied values.
     public init(_ message: String) { self.message = message }
+    /// Human-readable explanation suitable for error presentation.
     public var errorDescription: String? { message }
+    /// Textual representation of this error.
     public var description: String { message }
 }
 
+/// Expected issuer of GCP Confidential Space attestation tokens.
 public let GCPIssuer = "https://confidentialcomputing.googleapis.com"
+/// URL of the GCP attestation signing-key set.
 public let GCPJwksURI =
     "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com"
+/// RFC 9266 TLS exporter label used for channel binding.
 public let exporterLabel = "EXPORTER-Channel-Binding"
+/// Length in bytes of the TLS exporter channel binding.
 public let exporterLength = 32
 
 extension Data {
@@ -136,6 +170,7 @@ private func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
 }
 
 extension TrustedRouter {
+    /// Fetches the gateway attestation document.
     public func attestation() async throws -> Data {
         let urlString =
             self.baseUrl.replacingOccurrences(of: "/v1$", with: "", options: .regularExpression) + "/attestation"
@@ -158,6 +193,7 @@ extension TrustedRouter {
         return data
     }
 
+    /// Fetches the published trust release.
     public func trustRelease(
         url: String = TrustedRouterConstants.defaultTrustReleaseURL
     ) async throws -> [String: Any] {
@@ -165,6 +201,7 @@ extension TrustedRouter {
     }
 }
 
+/// Fetches the published image trust policy as a JSON object.
 public func fetchTrustRelease(
     trustUrl: String = TrustedRouterConstants.defaultTrustReleaseURL,
     urlSession: URLSession = .shared
@@ -194,6 +231,7 @@ public func fetchTrustRelease(
     return dict
 }
 
+/// Builds an attestation policy from published image pins and caller bindings.
 public func policyFromTrustRelease(
     release: [String: Any]? = nil,
     audience: String = "quill-cloud",
@@ -262,6 +300,7 @@ typealias AttestationSignatureVerifier = @Sendable (
     _ signature: Data
 ) throws -> Void
 
+/// Verifies signature, policy, nonce, and TLS bindings of a gateway attestation.
 public func verifyGatewayAttestation(
     document: Data,
     policy: AttestationPolicy,
