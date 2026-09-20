@@ -97,7 +97,7 @@ extension FusionTests {
         let malformedTools: [Any] = [NSNull(), "tools", [1], ["type": "function"]]
         for tools in malformedTools {
             do {
-                _ = try await router.fusion(messages: [], params: ["tools": tools])
+                _ = try await router.fusion(messages: [] as [[String: Any]], params: ["tools": tools])
                 XCTFail("accepted malformed tools")
             } catch TrustedRouterError.invalidResponse {
                 // Expected typed boundary failure.
