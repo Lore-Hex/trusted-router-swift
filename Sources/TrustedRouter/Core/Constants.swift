@@ -9,7 +9,7 @@ import FoundationNetworking
 /// Compile-time constants for the SDK: version, default endpoints, and models.
 public enum TrustedRouterConstants {
     /// SDK version reported in client metadata.
-    public static let version = "0.8.0"
+    public static let version = "0.9.0"
 
     // Use `compiler` rather than `swift`: this identity describes the
     // compiler/toolchain that built the SDK, while `swift` tests the selected
