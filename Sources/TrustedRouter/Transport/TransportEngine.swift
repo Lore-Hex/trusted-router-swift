@@ -203,7 +203,6 @@ extension TrustedRouter {
         }
     }
 
-
     private func makeTelemetryRecorder(
         method: String,
         path: String,

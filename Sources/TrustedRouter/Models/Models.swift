@@ -21,7 +21,7 @@ public struct ModelInfo: Codable, Sendable {
     public var openWeights: Bool { trustedrouter?.openWeights ?? false }
     public var usProviderAvailable: Bool { trustedrouter?.usProviderAvailable ?? false }
     public var euFocusedProviderAvailable: Bool { trustedrouter?.euFocusedProviderAvailable ?? false }
-    
+
     enum CodingKeys: String, CodingKey {
         case id, object, created, name, description, trustedrouter
         case ownedBy = "owned_by"
@@ -71,13 +71,21 @@ public enum JSONValue: Codable, Sendable, Equatable {
 
     public init(from decoder: Decoder) throws {
         let value = try decoder.singleValueContainer()
-        if value.decodeNil() { self = .null }
-        else if let item = try? value.decode(Bool.self) { self = .bool(item) }
-        else if let item = try? value.decode(Int.self) { self = .integer(item) }
-        else if let item = try? value.decode(Double.self) { self = .number(item) }
-        else if let item = try? value.decode(String.self) { self = .string(item) }
-        else if let item = try? value.decode([JSONValue].self) { self = .array(item) }
-        else { self = .object(try value.decode([String: JSONValue].self)) }
+        if value.decodeNil() {
+            self = .null
+        } else if let item = try? value.decode(Bool.self) {
+            self = .bool(item)
+        } else if let item = try? value.decode(Int.self) {
+            self = .integer(item)
+        } else if let item = try? value.decode(Double.self) {
+            self = .number(item)
+        } else if let item = try? value.decode(String.self) {
+            self = .string(item)
+        } else if let item = try? value.decode([JSONValue].self) {
+            self = .array(item)
+        } else {
+            self = .object(try value.decode([String: JSONValue].self))
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -128,34 +136,34 @@ public struct ChatCompletionChunk: Codable, Sendable {
     public var object: String?
     public var created: Int?
     public var model: String?
-    public var systemFingerprint: String? = nil
+    public var systemFingerprint: String?
     public var choices: [Choice]
-    public var usage: ChatCompletion.Usage? = nil
+    public var usage: ChatCompletion.Usage?
 
     enum CodingKeys: String, CodingKey {
         case id, object, created, model, choices, usage
         case systemFingerprint = "system_fingerprint"
     }
-    
+
     public struct Choice: Codable, Sendable {
         public var index: Int?
         public var delta: Delta?
         public var finishReason: String?
-        public var logprobs: JSONValue? = nil
-        
+        public var logprobs: JSONValue?
+
         enum CodingKeys: String, CodingKey {
             case index, delta, logprobs
             case finishReason = "finish_reason"
         }
-        
+
         public struct Delta: Codable, Sendable {
             public var role: String?
             public var content: String?
-            public var refusal: String? = nil
-            public var reasoning: String? = nil
-            public var reasoningContent: String? = nil
-            public var toolCalls: [ChatToolCall]? = nil
-            public var functionCall: ChatFunctionCall? = nil
+            public var refusal: String?
+            public var reasoning: String?
+            public var reasoningContent: String?
+            public var toolCalls: [ChatToolCall]?
+            public var functionCall: ChatFunctionCall?
 
             enum CodingKeys: String, CodingKey {
                 case role, content, refusal, reasoning
@@ -172,7 +180,7 @@ public struct ChatCompletion: Codable, Sendable {
     public var object: String
     public var created: Int?
     public var model: String?
-    public var systemFingerprint: String? = nil
+    public var systemFingerprint: String?
     public var choices: [Choice]
     public var usage: Usage?
 
@@ -180,28 +188,28 @@ public struct ChatCompletion: Codable, Sendable {
         case id, object, created, model, choices, usage
         case systemFingerprint = "system_fingerprint"
     }
-    
+
     public struct Choice: Codable, Sendable {
         public var index: Int
         public var message: Message
         public var finishReason: String?
-        public var logprobs: JSONValue? = nil
-        
+        public var logprobs: JSONValue?
+
         enum CodingKeys: String, CodingKey {
             case index, message, logprobs
             case finishReason = "finish_reason"
         }
-        
+
         public struct Message: Codable, Sendable {
             public var role: String
             public var content: String?
-            public var name: String? = nil
-            public var refusal: String? = nil
-            public var reasoning: String? = nil
-            public var reasoningContent: String? = nil
-            public var toolCalls: [ChatToolCall]? = nil
-            public var toolCallId: String? = nil
-            public var functionCall: ChatFunctionCall? = nil
+            public var name: String?
+            public var refusal: String?
+            public var reasoning: String?
+            public var reasoningContent: String?
+            public var toolCalls: [ChatToolCall]?
+            public var toolCallId: String?
+            public var functionCall: ChatFunctionCall?
 
             enum CodingKeys: String, CodingKey {
                 case role, content, name, refusal, reasoning
@@ -212,14 +220,14 @@ public struct ChatCompletion: Codable, Sendable {
             }
         }
     }
-    
+
     public struct Usage: Codable, Sendable {
         public var promptTokens: Int
         public var completionTokens: Int
         public var totalTokens: Int
-        public var promptTokensDetails: JSONValue? = nil
-        public var completionTokensDetails: JSONValue? = nil
-        
+        public var promptTokensDetails: JSONValue?
+        public var completionTokensDetails: JSONValue?
+
         enum CodingKeys: String, CodingKey {
             case promptTokens = "prompt_tokens"
             case completionTokens = "completion_tokens"
@@ -237,7 +245,7 @@ public struct EmbeddingResponse: Codable, Sendable {
     public var data: [Embedding]
     public var model: String
     public var usage: ChatCompletion.Usage?
-    
+
     public struct Embedding: Codable, Sendable {
         public var index: Int
         public var object: String?
@@ -253,22 +261,22 @@ public struct MessageResponse: Codable, Sendable {
     public var model: String
     public var stopReason: String?
     public var usage: Usage?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, type, role, content, model
         case stopReason = "stop_reason"
         case usage
     }
-    
+
     public struct Content: Codable, Sendable {
         public var type: String
         public var text: String?
     }
-    
+
     public struct Usage: Codable, Sendable {
         public var inputTokens: Int
         public var outputTokens: Int
-        
+
         enum CodingKeys: String, CodingKey {
             case inputTokens = "input_tokens"
             case outputTokens = "output_tokens"
@@ -282,14 +290,14 @@ public struct ResponseObject: Codable, Sendable {
     public var createdAt: Int?
     public var status: String?
     public var model: String?
-    public var output: [JSONValue]? = nil
-    public var usage: JSONValue? = nil
-    public var error: JSONValue? = nil
-    public var incompleteDetails: JSONValue? = nil
-    public var metadata: [String: JSONValue]? = nil
-    public var instructions: JSONValue? = nil
-    public var details: JSONValue? = nil
-    
+    public var output: [JSONValue]?
+    public var usage: JSONValue?
+    public var error: JSONValue?
+    public var incompleteDetails: JSONValue?
+    public var metadata: [String: JSONValue]?
+    public var instructions: JSONValue?
+    public var details: JSONValue?
+
     enum CodingKeys: String, CodingKey {
         case id, object, status, model, output, usage, error, metadata, instructions, details
         case createdAt = "created_at"
@@ -333,7 +341,7 @@ public struct ResponseObject: Codable, Sendable {
 public struct ResponseInputTokens: Codable, Sendable {
     public var inputTokens: Int
     public var totalTokens: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case totalTokens = "total_tokens"
@@ -348,7 +356,7 @@ public struct BroadcastDestination: Codable, Sendable {
     public var enabled: Bool?
     public var includeContent: Bool?
     public var method: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, type, name, endpoint, enabled, method
         case includeContent = "include_content"
@@ -365,7 +373,7 @@ public struct EmptyResponse: Codable, Sendable {}
 public struct AuthSessionResponse: Codable, Sendable {
     public var authenticated: Bool
     public var user: UserInfo?
-    
+
     public struct UserInfo: Codable, Sendable {
         public var id: String
         public var email: String?
@@ -374,13 +382,13 @@ public struct AuthSessionResponse: Codable, Sendable {
 
 public struct ActivityResponse: Codable, Sendable {
     public var activities: [Activity]
-    
+
     public struct Activity: Codable, Sendable {
         public var id: String
         public var createdAt: Int?
         public var type: String?
         public var metadata: [String: String]?
-        
+
         enum CodingKeys: String, CodingKey {
             case id, type, metadata
             case createdAt = "created_at"

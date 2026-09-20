@@ -40,7 +40,8 @@ public func verifyGatewaySession(
 
     do {
         try await connection.startAndWaitUntilReady(on: queue, timeout: timeout)
-        guard let tlsMetadata = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
+        guard let tlsMetadata =
+            connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else {
             throw AttestationVerificationError("TLS metadata unavailable after connection ready")
         }
         let secMetadata = tlsMetadata.securityProtocolMetadata
@@ -109,7 +110,7 @@ private struct GatewaySessionTarget {
     }
 }
 
-fileprivate actor AttestedHTTP1Reader {
+private actor AttestedHTTP1Reader {
     private let connection: NWConnection
     private let hostHeader: String
     private var buffer = Data()
@@ -131,7 +132,7 @@ fileprivate actor AttestedHTTP1Reader {
             "Accept: application/jwt, application/json, */*",
             "Connection: keep-alive",
             "",
-            "",
+            ""
         ].joined(separator: "\r\n")
         try await connection.sendAll(Data(request.utf8), timeout: timeout)
         let response = try await readHTTPResponse(timeout: timeout)
@@ -279,7 +280,9 @@ private extension NWConnection {
                 // A .ready that fires at the deadline can already have resumed
                 // the continuation; cancelling then would tear down the
                 // just-established pinned connection the caller is about to use.
-                if box.resume(throwing: AttestationVerificationError("gateway TLS connection timed out after \(timeout)s")) {
+                if box.resume(throwing: AttestationVerificationError(
+                    "gateway TLS connection timed out after \(timeout)s"
+                )) {
                     self?.cancel()
                 }
             }
@@ -321,7 +324,8 @@ private extension NWConnection {
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
-            send(content: data, contentContext: .defaultStream, isComplete: false, completion: .contentProcessed { error in
+            send(content: data, contentContext: .defaultStream, isComplete: false,
+                completion: .contentProcessed { error in
                 if let error {
                     if box.resume(throwing: error) {
                         timeoutItem.cancel()
@@ -414,11 +418,15 @@ public func verifyGatewaySession(
     connectIP: String? = nil,
     timeout: TimeInterval = 15
 ) async throws -> GatewaySession {
-    throw AttestationVerificationError("G6 attested sessions are not supported on this platform (needs Network.framework)")
+    throw AttestationVerificationError(
+        "G6 attested sessions are not supported on this platform (needs Network.framework)"
+    )
 }
 
 public func fetchAttestationAgain(_ session: GatewaySession, timeout: TimeInterval = 15) async throws -> Data {
-    throw AttestationVerificationError("G6 attested sessions are not supported on this platform (needs Network.framework)")
+    throw AttestationVerificationError(
+        "G6 attested sessions are not supported on this platform (needs Network.framework)"
+    )
 }
 
 #endif

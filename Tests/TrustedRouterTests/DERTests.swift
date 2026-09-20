@@ -1,5 +1,10 @@
+import Foundation
 import XCTest
 @testable import TrustedRouter
+
+#if canImport(Security)
+import Security
+#endif
 
 /// Each test crafts a known input and asserts byte-for-byte the DER output
 /// matches the ASN.1 BER/DER spec. The DER blob assembled here is what
@@ -98,5 +103,13 @@ final class DERTests: XCTestCase {
         #else
         throw XCTSkip("Security framework not available on this platform")
         #endif
+    }
+}
+
+extension DERTests {
+    func testIntegerNormalizesMultipleZerosAndSlicedData() {
+        let bytes = Data([0xff, 0, 0, 0, 0x42])
+        XCTAssertEqual(DER.integer(bytes.dropFirst()), Data([0x02, 0x01, 0x42]))
+        XCTAssertEqual(DER.integer(Data([0, 0, 0x42])), Data([0x02, 0x01, 0x42]))
     }
 }

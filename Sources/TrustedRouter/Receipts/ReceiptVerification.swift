@@ -36,6 +36,8 @@ public final class UnsupportedAttestationError: ReceiptAttestationError, @unchec
 public struct ReceiptHashClaims: Sendable, Equatable {
     public let alg: String
     public let hash: String
+    // Invariant: public receipt API uses the wire field name of.
+    // swiftlint:disable:next identifier_name
     public let of: String
     public let events: Int?
 }
@@ -61,6 +63,8 @@ public enum ReceiptAttestationStatus: String, Sendable, Equatable {
 }
 
 public struct ReceiptClaims: Sendable, Equatable {
+    // Invariant: public receipt API uses the wire field name rv.
+    // swiftlint:disable:next identifier_name
     public let rv: Int
     public let iss: String
     public let iat: Int
@@ -283,9 +287,9 @@ private struct DuplicateRejectingJSONScanner {
             }
             while offset < bytes.count, isDigit(bytes[offset]) { offset += 1 }
         }
-        if offset < bytes.count, (bytes[offset] == 0x65 || bytes[offset] == 0x45) {
+        if offset < bytes.count, bytes[offset] == 0x65 || bytes[offset] == 0x45 {
             offset += 1
-            if offset < bytes.count, (bytes[offset] == 0x2b || bytes[offset] == 0x2d) {
+            if offset < bytes.count, bytes[offset] == 0x2b || bytes[offset] == 0x2d {
                 offset += 1
             }
             guard offset < bytes.count, isDigit(bytes[offset]) else {
@@ -365,7 +369,8 @@ private func parseFlattenedEnvelope(_ object: [String: Any]) throws -> JWSEnvelo
           let payload = object["payload"] as? String, !payload.isEmpty,
           let signature = object["signature"] as? String, !signature.isEmpty else {
         throw ReceiptStructureError(
-            "JWS structure check failed: flattened JWS requires non-empty string protected, payload, and signature members"
+            "JWS structure check failed: flattened JWS requires non-empty string protected, "
+            + "payload, and signature members"
         )
     }
     let canonical = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
@@ -380,7 +385,7 @@ private func parseFlattenedEnvelope(_ object: [String: Any]) throws -> JWSEnvelo
 
 private func base64URLDecode(_ value: String, check: String, allowEmpty: Bool = false) throws -> Data {
     let bytes = Array(value.utf8)
-    guard (allowEmpty || !bytes.isEmpty), bytes.allSatisfy(base64URLBytes.contains),
+    guard allowEmpty || !bytes.isEmpty, bytes.allSatisfy(base64URLBytes.contains),
           bytes.count % 4 != 1 else {
         throw ReceiptStructureError("\(check) check failed: invalid base64url encoding")
     }
@@ -442,12 +447,12 @@ private func parseHeader(_ envelope: JWSEnvelope) throws -> ([String: Any], Data
           jwk["d"] == nil else {
         throw ReceiptHeaderError("protected header jwk check failed: expected a public OKP/Ed25519 JWK")
     }
-    guard let x = jwk["x"] as? String else {
+    guard let coordinate = jwk["x"] as? String else {
         throw ReceiptHeaderError("protected header jwk.x check failed: x must be a string")
     }
     let publicKey: Data
     do {
-        publicKey = try base64URLDecode(x, check: "protected header jwk.x")
+        publicKey = try base64URLDecode(coordinate, check: "protected header jwk.x")
     } catch let error as ReceiptVerificationError {
         throw ReceiptHeaderError(error.message)
     }
@@ -610,12 +615,12 @@ private func digestClaim(_ object: [String: Any], name: String, response: Bool) 
     guard digest.count == 32 else {
         throw ReceiptHashError("\(name).hash check failed: SHA-256 digest must be 32 bytes")
     }
-    guard let of = object["of"] as? String,
-          (response ? ["body", "sse-data-v1", "sse-events-v1"].contains(of) : of == "body") else {
+    guard let domain = object["of"] as? String,
+          response ? ["body", "sse-data-v1", "sse-events-v1"].contains(domain) : domain == "body" else {
         throw ReceiptHashError("\(name).of check failed: unsupported hash domain")
     }
     let events: Int?
-    if response && of != "body" {
+    if response && domain != "body" {
         if object["events"] == nil || object["events"] is NSNull {
             events = nil
         } else if let value = jsonInteger(object["events"]), value >= 0 {
@@ -631,7 +636,7 @@ private func digestClaim(_ object: [String: Any], name: String, response: Bool) 
         }
         events = nil
     }
-    return ReceiptHashClaims(alg: "sha256", hash: encoded, of: of, events: events)
+    return ReceiptHashClaims(alg: "sha256", hash: encoded, of: domain, events: events)
 }
 
 private struct StrictSSEEvent {
@@ -654,15 +659,10 @@ private func findSequence(_ sequence: Data, in data: Data, from start: Int) -> I
 }
 
 private func nextSSEEvent(in data: Data, from offset: Int) -> (Data, Int)? {
-    let lf = findSequence(lfEventEnd, in: data, from: offset)
+    let lineFeed = findSequence(lfEventEnd, in: data, from: offset)
     let crlf = findSequence(crlfEventEnd, in: data, from: offset)
-    guard lf != nil || crlf != nil else { return nil }
-    let end: Int
-    if let lf, crlf == nil || lf < crlf! {
-        end = lf + lfEventEnd.count
-    } else {
-        end = crlf! + crlfEventEnd.count
-    }
+    let endings = [lineFeed.map { $0 + lfEventEnd.count }, crlf.map { $0 + crlfEventEnd.count }]
+    guard let end = endings.compactMap({ $0 }).min() else { return nil }
     return (data.subdata(in: offset..<end), end)
 }
 
@@ -747,8 +747,10 @@ private func embeddedReceipt(in payload: Data) throws -> JWSEnvelope? {
 }
 
 private func streamDigest(
-    _ stream: Data, domain: String, expectedEnvelope: JWSEnvelope?
+    _ suppliedStream: Data, domain: String, expectedEnvelope: JWSEnvelope?
 ) throws -> (Data, Int) {
+    // Data slices retain their original indices; the wire scanner uses byte offsets from zero.
+    let stream = Data(suppliedStream)
     var preimage = Data()
     var eventCount = 0
     var offset = 0
@@ -774,7 +776,8 @@ private func streamDigest(
             guard let expectedEnvelope,
                   embedded.flattenedCanonicalJSON == expectedEnvelope.flattenedCanonicalJSON else {
                 throw ReceiptHashError(
-                    "response stream receipt position check failed: embedded receipt does not match the verified flattened JWS"
+                    "response stream receipt position check failed: embedded receipt does not match "
+                    + "the verified flattened JWS"
                 )
             }
             sawReceipt = true
@@ -835,7 +838,8 @@ private func verifyAttestation(
         guard let suppliedAttestation else {
             guard !requireAttestation else {
                 throw MissingAttestationError(
-                    "attestation check failed: compact receipts omit attestation evidence; obtain the pinned document or explicitly pass requireAttestation: false"
+                    "attestation check failed: compact receipts omit attestation evidence; obtain "
+                    + "the pinned document or explicitly pass requireAttestation: false"
                 )
             }
             return .unverifiedByThisSDK
@@ -882,7 +886,8 @@ private func verifyAttestation(
         if let suppliedAttestation,
            !constantTimeEqual(suppliedAttestation, document) {
             throw ReceiptAttestationError(
-                "attestation check failed: supplied attestation does not match the flattened receipt's embedded attestation"
+                "attestation check failed: supplied attestation does not match the flattened "
+                + "receipt's embedded attestation"
             )
         }
     }
@@ -949,7 +954,7 @@ public func verifyReceipt(
     let object: [String: Any] = [
         "protected": receipt.protected,
         "payload": receipt.payload,
-        "signature": receipt.signature,
+        "signature": receipt.signature
     ]
     let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     return try await verifyReceipt(data, expectedIssuer: expectedIssuer, options: options)
@@ -991,7 +996,7 @@ func verifyReceipt(
         throw ReceiptClaimsError("rv claim check failed: receipt claims must be a JSON object")
     }
 
-    guard let rv = jsonInteger(payload["rv"]), rv == 1 else {
+    guard let version = jsonInteger(payload["rv"]), version == 1 else {
         throw ReceiptClaimsError("rv claim check failed: expected integer 1")
     }
 
@@ -1066,7 +1071,7 @@ func verifyReceipt(
         nonce = nil
     }
     if let expected = options.expectedNonce,
-       nonce == nil || !constantTimeEqual(nonce!, expected) {
+       nonce.map({ !constantTimeEqual($0, expected) }) ?? true {
         throw ReceiptNonceError("nonce match check failed: expected '\(expected)', got '\(nonce ?? "nil")'")
     }
 
@@ -1156,7 +1161,7 @@ func verifyReceipt(
     )
 
     return ReceiptClaims(
-        rv: rv, iss: iss, iat: iat, jti: jti, gen: gen, nonce: nonce, route: route,
+        rv: version, iss: iss, iat: iat, jti: jti, gen: gen, nonce: nonce, route: route,
         req: req, resp: resp, model: model, upstream: upstream,
         attSha256: attSha256, attestationStatus: attestationStatus
     )

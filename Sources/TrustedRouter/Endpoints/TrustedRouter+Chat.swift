@@ -235,9 +235,13 @@ extension TrustedRouter {
         }
 
         let choices = collected.keys.sorted().map { index -> ChatCompletion.Choice in
+            // Invariant: index comes from unchanged collected.keys.
+            // swiftlint:disable:next force_unwrapping
             let result = collected[index]!
             let tools = result.toolCalls.isEmpty
                 ? nil
+                // Invariant: key comes from unchanged toolCalls.keys.
+                // swiftlint:disable:next force_unwrapping
                 : result.toolCalls.keys.sorted().map { result.toolCalls[$0]! }
             return ChatCompletion.Choice(
                 index: index,

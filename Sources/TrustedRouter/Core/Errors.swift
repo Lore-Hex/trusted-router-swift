@@ -77,7 +77,7 @@ extension TrustedRouter {
 
     func classifyError(statusCode: Int, data: Data?, response: HTTPURLResponse) -> TrustedRouterError {
         var message = HTTPURLResponse.localizedString(forStatusCode: statusCode)
-        var payload: [String: Any]? = nil
+        var payload: [String: Any]?
 
         if let data = data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             payload = obj
@@ -97,7 +97,10 @@ extension TrustedRouter {
         case 401: return .authentication(statusCode: statusCode, message: message, payload: payload)
         case 403: return .permissionDenied(statusCode: statusCode, message: message, payload: payload)
         case 404: return .notFound(statusCode: statusCode, message: message, payload: payload)
-        case 429: return .rateLimit(statusCode: statusCode, message: message, payload: payload, retryAfterSeconds: retryAfter)
+        case 429: return .rateLimit(
+            statusCode: statusCode, message: message, payload: payload,
+            retryAfterSeconds: retryAfter
+        )
         case 501: return .endpointNotSupported(statusCode: statusCode, message: message, payload: payload)
         case 400..<500: return .badRequest(statusCode: statusCode, message: message, payload: payload)
         case 500...: return .generic(statusCode: statusCode, message: message, payload: payload)

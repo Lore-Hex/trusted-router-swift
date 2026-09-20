@@ -131,10 +131,10 @@ public struct TrustedRouterOptions {
     // Deterministic beacon seams used only by @testable contract tests. The
     // production path leaves these nil and TelemetryReporter creates its own
     // ephemeral URLSession and clocks.
-    var telemetryURLSession: URLSession? = nil
-    var telemetryClock: (@Sendable () -> Double)? = nil
-    var telemetryWallClock: (@Sendable () -> Double)? = nil
-    var telemetryRandom: (@Sendable () -> Double)? = nil
+    var telemetryURLSession: URLSession?
+    var telemetryClock: (@Sendable () -> Double)?
+    var telemetryWallClock: (@Sendable () -> Double)?
+    var telemetryRandom: (@Sendable () -> Double)?
     var telemetryFlushSeconds: Double = ClientTelemetry.telemetryFlushSeconds
 }
 

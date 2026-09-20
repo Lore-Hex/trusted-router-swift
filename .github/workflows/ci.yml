@@ -12,8 +12,14 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Static gate
+        run: swiftlint --strict
+      - name: Static gate mutation proof
+        run: python3 scripts/static-gate-check.py
       - name: Test
         run: swift test
+      - name: Boundary mutation gate
+        run: scripts/mutation-check.sh
 
   linux:
     runs-on: ubuntu-latest

@@ -70,7 +70,7 @@ extension URLSession {
     /// physical sends. Cookie behavior, proxies, protocol classes, cache,
     /// timeouts, and benign default headers remain configured as supplied.
     func trustedRouterTransportCopy() -> URLSession {
-        let copied = configuration.copy() as! URLSessionConfiguration
+        let copied = configuration
         copied.urlCredentialStorage = nil
         return URLSession(configuration: copied)
     }
@@ -135,11 +135,11 @@ extension URLSession {
     /// authentication stores and defaults. Used only for public metadata and
     /// OAuth code exchange paths that promise to send no client credentials.
     func trustedRouterCredentialFreeCopy() -> URLSession {
-        let copied = configuration.copy() as! URLSessionConfiguration
+        let copied = configuration
         var headers = copied.httpAdditionalHeaders ?? [:]
         for key in Array(headers.keys)
             where TrustedRouter.credentialHeaderNames.contains(
-                String(describing: key).lowercased()
+                (key as? String)?.lowercased() ?? ""
             ) {
             headers.removeValue(forKey: key)
         }

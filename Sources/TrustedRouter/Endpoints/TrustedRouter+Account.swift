@@ -86,9 +86,10 @@ extension TrustedRouter {
             throw classifyError(statusCode: httpResponse.statusCode, data: data, response: httpResponse)
         }
         // Return raw dict for status as it's highly dynamic
-        if let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return dict
+        guard let dict =
+            try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) as? [String: Any] else {
+            throw TrustedRouterError.invalidResponse("Status response must be a JSON object")
         }
-        return [:]
+        return dict
     }
 }

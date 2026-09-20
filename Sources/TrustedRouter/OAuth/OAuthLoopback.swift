@@ -282,7 +282,9 @@ public actor OAuthLoopback {
             }
         }
         guard bindResult == 0 else {
-            throw TrustedRouterError.internalError("could not bind 127.0.0.1:\(port) (errno \(errno)); is another sign-in in progress?")
+            throw TrustedRouterError.internalError(
+                "could not bind 127.0.0.1:\(port) (errno \(errno)); is another sign-in in progress?"
+            )
         }
         guard listen(listenFD, 4) == 0 else {
             throw TrustedRouterError.internalError("could not listen on 127.0.0.1:\(port) (errno \(errno))")
@@ -317,52 +319,54 @@ public actor OAuthLoopback {
             }
         }
         #else
-        throw TrustedRouterError.internalError("OAuthLoopback requires POSIX sockets (Glibc/Darwin); unavailable on this platform")
+        throw TrustedRouterError.internalError(
+            "OAuthLoopback requires POSIX sockets (Glibc/Darwin); unavailable on this platform"
+        )
         #endif
     }
 
     #if canImport(Glibc) || canImport(Darwin)
-    /// Read up to the end of the HTTP request line (first CRLF) from `fd`.
+    /// Read up to the end of the HTTP request line (first CRLF) from `descriptor`.
     /// We only need the request line — headers/body are ignored.
-    private static func readRequestLine(_ fd: Int32) -> String? {
+    private static func readRequestLine(_ descriptor: Int32) -> String? {
         var collected = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 1024)
         // Cap total bytes so a misbehaving client can't make us spin forever.
         while collected.count < 8192 {
-            let n = buffer.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
-            if n <= 0 { break }
-            collected.append(contentsOf: buffer[0..<n])
+            let count = buffer.withUnsafeMutableBytes { recv(descriptor, $0.baseAddress, $0.count, 0) }
+            if count <= 0 { break }
+            collected.append(contentsOf: buffer[0..<count])
             // Stop as soon as we have the request line (terminated by CRLF or LF).
-            if let nl = collected.firstIndex(of: 0x0A) {
-                let lineBytes = collected[..<nl]
+            if let newline = collected.firstIndex(of: 0x0A) {
+                let lineBytes = collected[..<newline]
                 let trimmed = lineBytes.last == 0x0D ? lineBytes.dropLast() : lineBytes[...]
-                return String(decoding: Array(trimmed), as: UTF8.self)
+                return String(decoding: trimmed, as: Unicode.UTF8.self)
             }
         }
         if collected.isEmpty { return nil }
-        return String(decoding: collected, as: UTF8.self)
+        return String(decoding: collected, as: Unicode.UTF8.self)
     }
 
-    /// Write `text` fully to `fd`, looping over partial writes.
-    private static func writeAll(_ fd: Int32, _ text: String) {
+    /// Write `text` fully to `descriptor`, looping over partial writes.
+    private static func writeAll(_ descriptor: Int32, _ text: String) {
         let bytes = Array(text.utf8)
         var offset = 0
         bytes.withUnsafeBytes { raw in
-            let base = raw.baseAddress!
+            guard let base = raw.baseAddress else { return }
             while offset < bytes.count {
-                let n = send(fd, base.advanced(by: offset), bytes.count - offset, 0)
-                if n <= 0 { break }
-                offset += n
+                let count = send(descriptor, base.advanced(by: offset), bytes.count - offset, 0)
+                if count <= 0 { break }
+                offset += count
             }
         }
     }
 
     /// Close a descriptor on whichever libc is present.
-    private static func closeFD(_ fd: Int32) {
+    private static func closeFD(_ descriptor: Int32) {
         #if canImport(Glibc)
-        _ = Glibc.close(fd)
+        _ = Glibc.close(descriptor)
         #elseif canImport(Darwin)
-        _ = Darwin.close(fd)
+        _ = Darwin.close(descriptor)
         #endif
     }
     #endif

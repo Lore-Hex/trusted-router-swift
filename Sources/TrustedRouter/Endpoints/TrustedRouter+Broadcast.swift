@@ -49,10 +49,17 @@ extension TrustedRouter {
     public func getBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
-        return try await request(method: "GET", path: "/broadcast/destinations/\(id)", options: options, plane: .control)
+        return try await request(
+            method: "GET", path: "/broadcast/destinations/\(id)",
+            options: options, plane: .control
+        )
     }
 
-    public func updateBroadcastDestination(id: String, patch: [String: Any], workspaceId: String? = nil) async throws -> BroadcastDestination {
+    public func updateBroadcastDestination(
+        id: String,
+        patch: [String: Any],
+        workspaceId: String? = nil
+    ) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
         return try await request(

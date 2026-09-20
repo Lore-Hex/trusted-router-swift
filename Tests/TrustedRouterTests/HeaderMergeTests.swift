@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import TrustedRouter
 
@@ -244,5 +245,20 @@ final class HeaderMergeTests: XCTestCase {
         )
         XCTAssertEqual(custom.value(forHTTPHeaderField: "Content-Type"), "text/plain",
                        "a caller content type in any casing suppresses the default")
+    }
+}
+
+extension HeaderMergeTests {
+    func testResponseHeadersAcceptArbitraryCasing() throws {
+        let url = try XCTUnwrap(URL(string: "https://headers.test"))
+        for name in ["X-SHOULD-RETRY", "x-ShOuLd-ReTrY", "X-should-retry"] {
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url, statusCode: 502, httpVersion: "HTTP/1.1",
+                headerFields: [name: "false", "rEtRy-AfTeR-mS": "250", "x-ReQuEsT-iD": "req-test"]
+            ))
+            XCTAssertEqual(RetryPolicy.shouldRetryVerdict(response), false)
+            XCTAssertEqual(RetryPolicy.parseRetryAfter(response), 0.25)
+            XCTAssertEqual(RetryPolicy.header(response, "x-request-id"), "req-test")
+        }
     }
 }

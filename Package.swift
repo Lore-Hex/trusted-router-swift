@@ -26,7 +26,8 @@ let package = Package(
             name: "TrustedRouterTests",
             dependencies: ["TrustedRouter"],
             resources: [
-                .copy("Fixtures/receipts")
+                .copy("Fixtures/receipts"),
+                .copy("Fixtures/auth-wire-fixtures.json")
             ]),
     ]
 )

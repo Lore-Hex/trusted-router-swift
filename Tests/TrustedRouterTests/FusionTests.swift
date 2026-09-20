@@ -82,3 +82,28 @@ final class FusionTests: XCTestCase {
         XCTAssertEqual(result.choices.first?.message.content, "ok")
     }
 }
+
+extension FusionTests {
+    func testFusionRejectsMalformedToolsBeforeSending() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let router = try TrustedRouter(options: .init(apiKey: "test", urlSession: session, maxRetries: 0))
+        MockURLProtocol.requestHandler = { _ in
+            XCTFail("malformed tools reached transport")
+            throw URLError(.badURL)
+        }
+        let malformedTools: [Any] = [NSNull(), "tools", [1], ["type": "function"]]
+        for tools in malformedTools {
+            do {
+                _ = try await router.fusion(messages: [], params: ["tools": tools])
+                XCTFail("accepted malformed tools")
+            } catch TrustedRouterError.invalidResponse {
+                // Expected typed boundary failure.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+}

@@ -16,14 +16,14 @@ public enum DER {
     /// has the high bit clear; prepend 0x00 if the high bit of the first
     /// byte is set so the value isn't read as negative.
     public static func integer(_ unsigned: Data) -> Data {
-        var bytes = unsigned
+        var bytes = Array(unsigned)
         while bytes.count > 1, bytes[0] == 0, bytes[1] < 0x80 {
             bytes.removeFirst()
         }
         if let first = bytes.first, first >= 0x80 {
             bytes.insert(0, at: 0)
         }
-        return Data([0x02]) + lengthPrefix(for: bytes.count) + bytes
+        return Data([0x02]) + lengthPrefix(for: bytes.count) + Data(bytes)
     }
 
     /// Wrap an arbitrary payload in an ASN.1 DER SEQUENCE.
@@ -45,7 +45,7 @@ public enum DER {
     }
 
     /// Assemble a PKCS#1 `RSAPublicKey` DER blob from the JWK n/e pair.
-    public static func rsaPublicKeyPKCS1(n: Data, e: Data) -> Data {
-        sequence(integer(n) + integer(e))
+    public static func rsaPublicKeyPKCS1(n modulus: Data, e exponent: Data) -> Data {
+        sequence(integer(modulus) + integer(exponent))
     }
 }
