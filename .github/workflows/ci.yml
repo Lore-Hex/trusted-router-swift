@@ -18,10 +18,24 @@ jobs:
         run: swiftlint --strict
       - name: Static gate mutation proof
         run: python3 scripts/static-gate-check.py
+      - name: Build library
+        run: swift build
+      - name: Public DocC coverage (zero undocumented declarations)
+        run: python3 scripts/check-public-docs.py --modules .build/debug/Modules
+      - name: Release artifact, verbatim snippets, and external consumer
+        run: python3 scripts/test-consumer-dx.py -v
+      - name: Consumer gate mutation proof
+        run: python3 scripts/consumer-mutation-check.py --scratch-path .build
       - name: Test
         run: swift test
       - name: Boundary mutation gate
         run: scripts/mutation-check.sh
+      - name: Build release source archive
+        run: python3 scripts/build-artifact.py /tmp/TrustedRouter.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TrustedRouter-source
+          path: /tmp/TrustedRouter.zip
 
   linux:
     runs-on: ubuntu-latest

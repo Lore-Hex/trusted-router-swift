@@ -10,12 +10,14 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
+    /// Lists broadcast destinations for the selected workspace.
     public func broadcastDestinations(workspaceId: String? = nil) async throws -> DataList<BroadcastDestination> {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
         return try await request(method: "GET", path: "/broadcast/destinations", options: options, plane: .control)
     }
 
+    /// Creates the selected broadcast destination.
     public func createBroadcastDestination(
         type: String,
         name: String = "Broadcast destination",
@@ -46,6 +48,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Fetches the selected broadcast destination.
     public func getBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> BroadcastDestination {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
@@ -55,6 +58,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Updates the selected broadcast destination.
     public func updateBroadcastDestination(
         id: String,
         patch: [String: Any],
@@ -68,6 +72,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Deletes the selected broadcast destination.
     public func deleteBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId
@@ -77,6 +82,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Tests delivery to the selected broadcast destination.
     public func testBroadcastDestination(id: String, workspaceId: String? = nil) async throws -> EmptyResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId

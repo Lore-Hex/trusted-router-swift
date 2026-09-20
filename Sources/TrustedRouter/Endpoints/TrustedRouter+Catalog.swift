@@ -9,6 +9,7 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
+    /// Lists models matching the optional capability and provider filters.
     public func models(
         openWeights: Bool? = nil,
         providerJurisdiction: String? = nil,
@@ -25,14 +26,17 @@ extension TrustedRouter {
         )
     }
 
+    /// Lists providers advertised by the control plane.
     public func providers() async throws -> DataList<ProviderInfo> {
         return try await request(method: "GET", path: "/providers", plane: .control)
     }
 
+    /// Lists available routing regions.
     public func regions() async throws -> DataList<RegionInfo> {
         return try await request(method: "GET", path: "/regions", plane: .control)
     }
 
+    /// Fetches the credit balance for the selected workspace.
     public func credits(workspaceId: String? = nil) async throws -> CreditsResponse {
         var options = PerCallOptions()
         options.workspaceId = workspaceId

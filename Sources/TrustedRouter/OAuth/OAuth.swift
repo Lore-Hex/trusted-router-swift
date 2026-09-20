@@ -33,6 +33,7 @@ public struct PKCEChallenge: Sendable, Equatable {
     /// Always `"S256"` for the challenges this type produces.
     public let codeChallengeMethod: String
 
+    /// Creates a `PKCEChallenge` with the supplied values.
     public init(codeVerifier: String, codeChallenge: String, codeChallengeMethod: String = "S256") {
         self.codeVerifier = codeVerifier
         self.codeChallenge = codeChallenge
@@ -349,17 +350,25 @@ public func fetchUserInfo(
 @available(macOS 10.15, iOS 13.0, tvOS 16.0, *)
 @MainActor
 public final class TrustedRouterOAuth {
+    /// Base URL used for OAuth requests.
     public let baseURL: String
+    /// Session whose configuration supplies the request transport policy.
     public let urlSession: URLSession
 
     /// Optional defaults forwarded into the authorize URL.
     public var keyLabel: String?
+    /// Spending limit requested for the delegated key.
     public var limit: String?
+    /// Accounting interval used for the delegated key limit.
     public var usageLimitType: String?
+    /// Expiration time for the token or delegated credential.
     public var expiresAt: String?
+    /// Whether the authorization flow requests an agent.
     public var spawnAgent: String?
+    /// Whether the authorization flow requests a cloud instance.
     public var spawnCloud: String?
 
+    /// Creates a `TrustedRouterOAuth` with the supplied values.
     public init(
         baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
         urlSession: URLSession = .shared,

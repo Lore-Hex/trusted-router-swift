@@ -1,0 +1,18 @@
+{
+  "description": "Zero-dependency Swift client for TrustedRouter: typed chat, streaming, OAuth, attestation and receipt verification.",
+  "licenseURL": "https://www.apache.org/licenses/LICENSE-2.0",
+  "readmeURL": "https://github.com/Lore-Hex/trusted-router-swift/blob/main/README.md",
+  "repositoryURLs": [
+    "https://github.com/Lore-Hex/trusted-router-swift"
+  ],
+  "homepageURL": "https://trustedrouter.com",
+  "documentationURL": "https://github.com/Lore-Hex/trusted-router-swift/blob/main/README.md",
+  "keywords": [
+    "swift",
+    "trustedrouter",
+    "llm",
+    "streaming",
+    "attestation"
+  ],
+  "license": "Apache-2.0"
+}

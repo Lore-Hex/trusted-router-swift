@@ -1,6 +1,7 @@
 // swift-tools-version: 5.9
 
 import PackageDescription
+import Foundation
 
 let package = Package(
     name: "TrustedRouter",
@@ -22,12 +23,19 @@ let package = Package(
         .target(
             name: "TrustedRouter",
             dependencies: []),
+    ]
+)
+
+// Release archives contain only the library. Repository checkouts also expose tests.
+if FileManager.default.fileExists(atPath: URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent().appendingPathComponent("Tests/TrustedRouterTests").path) {
+    package.targets.append(
         .testTarget(
             name: "TrustedRouterTests",
             dependencies: ["TrustedRouter"],
             resources: [
                 .copy("Fixtures/receipts"),
                 .copy("Fixtures/auth-wire-fixtures.json")
-            ]),
-    ]
-)
+            ])
+    )
+}

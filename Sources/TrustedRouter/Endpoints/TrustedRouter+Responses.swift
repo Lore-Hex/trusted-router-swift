@@ -8,6 +8,7 @@ import FoundationNetworking
 
 extension TrustedRouter {
 
+    /// Creates embedding vectors for the supplied input.
     public func embeddings(
         model: String,
         input: Any,
@@ -31,6 +32,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Creates a message using the Messages API.
     public func messages(
         model: String,
         messages: [[String: Any]],
@@ -50,6 +52,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Creates a response through the Responses API.
     public func responses(
         model: String = TrustedRouterConstants.autoModel,
         input: Any,
@@ -72,6 +75,7 @@ extension TrustedRouter {
         )
     }
 
+    /// Streams decoded Responses API events.
     @available(macOS 12.0, iOS 15.0, tvOS 15.0, watchOS 8.0, *)
     public func responsesEvents(
         model: String = TrustedRouterConstants.autoModel,
@@ -110,6 +114,7 @@ extension TrustedRouter {
         return makeDictionarySSEEvents(bytes: bytes, recorder: recorder)
     }
 
+    /// Counts input tokens for a Responses API request.
     public func responsesInputTokens(
         model: String = TrustedRouterConstants.autoModel,
         input: Any,

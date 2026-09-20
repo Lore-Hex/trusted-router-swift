@@ -40,14 +40,19 @@ public actor OAuthLoopback {
     /// The request path the listener answers (everything else 404s).
     public static let callbackPath = "/callback"
 
+    /// Base URL used for OAuth requests.
     public let baseURL: String
+    /// Session whose configuration supplies the request transport policy.
     public let urlSession: URLSession
 
     /// Optional defaults forwarded into the authorize URL (mirrors
     /// `TrustedRouterOAuth`).
     public let keyLabel: String?
+    /// Spending limit requested for the delegated key.
     public let limit: String?
+    /// Accounting interval used for the delegated key limit.
     public let usageLimitType: String?
+    /// Expiration time for the token or delegated credential.
     public let expiresAt: String?
 
     /// The PKCE pair + state for the in-flight authorization. Generated lazily
@@ -56,6 +61,7 @@ public actor OAuthLoopback {
     private var pkce: PKCEChallenge?
     private var state: String?
 
+    /// Creates an `OAuthLoopback` with the supplied values.
     public init(
         baseURL: String = TrustedRouterConstants.defaultControlBaseURL,
         urlSession: URLSession = .shared,

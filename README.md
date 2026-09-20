@@ -9,10 +9,38 @@ This is a pure Swift, zero-dependency client SDK for the TrustedRouter gateway. 
 Add this to your `Package.swift` dependencies:
 
 ```swift
-.package(url: "https://github.com/Lore-Hex/trusted-router-swift.git", from: "0.7.0")
+// swift-tools-version: 5.9
+import PackageDescription
+
+let package = Package(
+    name: "MyApp",
+    platforms: [.macOS(.v13)],
+    dependencies: [
+        .package(url: "https://github.com/Lore-Hex/trusted-router-swift.git", from: "0.7.0")
+    ],
+    targets: [
+        .executableTarget(name: "MyApp", dependencies: [
+            .product(name: "TrustedRouter", package: "trusted-router-swift")
+        ])
+    ]
+)
 ```
 
-Then add `"TrustedRouter"` to your target's dependencies.
+Requires Swift 5.9 or newer; Apple deployment minimums are macOS 13, iOS 16,
+tvOS 16, and watchOS 9. Linux uses FoundationNetworking. No third-party runtime
+dependencies or CLI are installed.
+
+Git dependencies fetch the repository, including development files. For a clean
+release source archive, maintainers run `python3 scripts/build-artifact.py /tmp/TrustedRouter.zip`.
+Extract it and use `.package(path: "/path/to/TrustedRouter")` for a local dependency.
+The archive contains the library sources, manifest, README, Apache 2.0 license,
+and `package-metadata.json` only. The latter includes Swift registry metadata
+plus homepage, documentation, SPDX license, and discovery keyword extensions.
+CI verifies this archive and compiles an external consumer against it.
+
+[Documentation](https://github.com/Lore-Hex/trusted-router-swift/blob/main/README.md) ·
+[Repository](https://github.com/Lore-Hex/trusted-router-swift) ·
+[Homepage](https://trustedrouter.com)
 
 ## Usage
 
@@ -81,6 +109,9 @@ one answer. `fusion(...)` returns the same `ChatCompletion` as `chatCompletions`
 most-permissive configuration.
 
 ```swift
+import TrustedRouter
+
+let client = try TrustedRouter(options: .init(apiKey: "your-api-key"))
 let answer = try await client.fusion(
     messages: [.user("explain how mRNA vaccines work")],
     analysisModels: TrustedRouterConstants.fusionFreedomPanel,   // the panel
@@ -101,6 +132,9 @@ hard requirement, including with an explicit model. Use
 `TrustedRouterConstants.euModel` for the EU-focused routing pool:
 
 ```swift
+import TrustedRouter
+
+let client = try TrustedRouter(options: .init(apiKey: "your-api-key"))
 let response = try await client.chatCompletions(
     model: "z-ai/glm-5.2",
     messages: [.user("Review this contract.")],
@@ -146,15 +180,23 @@ bindings by default, so a valid signature cannot be mistaken for proof about
 different traffic:
 
 ```swift
-let claims = try await verifyReceipt(
-    receiptJWS,
-    expectedIssuer: "https://api.trustedrouter.com",
-    options: ReceiptVerificationOptions(
-        requestBody: serializedRequest,
-        responseBody: responseBytes,
-        expectedNonce: requestNonce
+import Foundation
+import TrustedRouter
+
+func verifyCapturedReceipt(
+    receiptJWS: String, serializedRequest: Data, responseBytes: Data, requestNonce: String
+) async throws {
+    let claims = try await verifyReceipt(
+        receiptJWS,
+        expectedIssuer: "https://api.trustedrouter.com",
+        options: ReceiptVerificationOptions(
+            requestBody: serializedRequest,
+            responseBody: responseBytes,
+            expectedNonce: requestNonce
+        )
     )
-)
+    print(claims)
+}
 ```
 
 For deliberate signature-only inspection, pass `requireBindings: false`.
@@ -218,13 +260,14 @@ browser, validates the redirect, and returns the delegated key + identity.
 ```swift
 import TrustedRouter
 
+#if canImport(AuthenticationServices)
 let oauth = TrustedRouterOAuth(keyLabel: "My App", limit: "5")
 let token = try await oauth.authenticate(
-    callbackURL: "myapp://oauth-callback",          // your registered custom scheme
-    presentationContextProvider: self)              // anchors the auth sheet
+    callbackURL: "myapp://oauth-callback")          // your registered custom scheme
 let key = token.key                                 // sk-tr-v1-… ; token.identity = {sub, email, …}
 
 let who = try await fetchUserInfo(apiKey: key)      // verified identity
+#endif
 ```
 
 `AuthenticationServices` isn't available on Linux, so for cross-platform GUI

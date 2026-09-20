@@ -5,9 +5,13 @@ import Foundation
 /// need to pass tool-call fields. For tool-call interop, fall back to the
 /// `[[String: Any]]` overload.
 public struct ChatMessage: Codable, Sendable {
+    /// Message role, such as system, user, assistant, or tool.
     public var role: String
+    /// Message content returned by or sent to the model.
     public var content: String?
+    /// Human-readable name or function name, as defined by the endpoint.
     public var name: String?
+    /// Identifier of the tool call answered by this message.
     public var toolCallId: String?
 
     enum CodingKeys: String, CodingKey {
@@ -15,6 +19,7 @@ public struct ChatMessage: Codable, Sendable {
         case toolCallId = "tool_call_id"
     }
 
+    /// Creates a `ChatMessage` with the supplied values.
     public init(role: String, content: String? = nil, name: String? = nil, toolCallId: String? = nil) {
         self.role = role
         self.content = content

@@ -13,16 +13,26 @@ import FoundationNetworking
 /// `message` if present, otherwise the raw body), and the decoded payload
 /// for callers that need to inspect provider-specific fields.
 public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
+    /// The service rejected the request as invalid.
     case badRequest(statusCode: Int, message: String, payload: [String: Any]?)
+    /// Authentication was rejected by the service.
     case authentication(statusCode: Int, message: String, payload: [String: Any]?)
+    /// The service denied permission for this operation.
     case permissionDenied(statusCode: Int, message: String, payload: [String: Any]?)
+    /// The requested resource was not found.
     case notFound(statusCode: Int, message: String, payload: [String: Any]?)
+    /// The service does not support this endpoint.
     case endpointNotSupported(statusCode: Int, message: String, payload: [String: Any]?)
+    /// The service rate-limited the request, optionally supplying a retry delay.
     case rateLimit(statusCode: Int, message: String, payload: [String: Any]?, retryAfterSeconds: Double?)
+    /// An internal client operation failed.
     case internalError(String)
+    /// An HTTP failure not represented by a more specific error case.
     case generic(statusCode: Int, message: String, payload: [String: Any]?)
+    /// The response did not match the expected wire format.
     case invalidResponse(String)
 
+    /// Human-readable explanation suitable for error presentation.
     public var errorDescription: String? { description }
 
     /// Routing layer supplied by the actionable API error envelope.
@@ -48,6 +58,7 @@ public enum TrustedRouterError: Error, LocalizedError, CustomStringConvertible {
         let detail = (payload?["error"] as? [String: Any]) ?? payload
         return detail?[key] as? String
     }
+    /// Textual representation of this error.
     public var description: String {
         switch self {
         case let .badRequest(statusCode, message, _),
