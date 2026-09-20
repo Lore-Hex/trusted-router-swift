@@ -77,8 +77,8 @@ enum OAuthCrypto {
         // Fall through to the system RNG if Security ever fails.
         #endif
         var rng = SystemRandomNumberGenerator()
-        for i in 0..<count {
-            bytes[i] = UInt8.random(in: UInt8.min...UInt8.max, using: &rng)
+        for index in 0..<count {
+            bytes[index] = UInt8.random(in: UInt8.min...UInt8.max, using: &rng)
         }
         return bytes
     }
@@ -119,7 +119,7 @@ enum OAuthCrypto {
 /// without CryptoKit (i.e. Linux) so the SDK can keep its zero-dependency
 /// promise while still computing PKCE S256 challenges everywhere.
 enum SHA256Pure {
-    private static let k: [UInt32] = [
+    private static let roundConstants: [UInt32] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
         0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
         0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -131,7 +131,7 @@ enum SHA256Pure {
     ]
 
     static func digest(_ message: [UInt8]) -> [UInt8] {
-        var h: [UInt32] = [
+        var hashState: [UInt32] = [
             0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
         ]
@@ -141,47 +141,55 @@ enum SHA256Pure {
         let bitLength = UInt64(message.count) * 8
         msg.append(0x80)
         while msg.count % 64 != 56 { msg.append(0x00) }
-        for i in stride(from: 56, through: 0, by: -8) {
-            msg.append(UInt8((bitLength >> UInt64(i)) & 0xff))
+        for index in stride(from: 56, through: 0, by: -8) {
+            msg.append(UInt8((bitLength >> UInt64(index)) & 0xff))
         }
 
-        func rotr(_ x: UInt32, _ n: UInt32) -> UInt32 { (x >> n) | (x << (32 - n)) }
+        func rotr(_ value: UInt32, _ shift: UInt32) -> UInt32 { (value >> shift) | (value << (32 - shift)) }
 
         // Process each 512-bit chunk.
         for chunkStart in stride(from: 0, to: msg.count, by: 64) {
-            var w = [UInt32](repeating: 0, count: 64)
-            for i in 0..<16 {
-                let j = chunkStart + i * 4
-                w[i] = (UInt32(msg[j]) << 24) | (UInt32(msg[j + 1]) << 16)
-                     | (UInt32(msg[j + 2]) << 8) | UInt32(msg[j + 3])
+            var schedule = [UInt32](repeating: 0, count: 64)
+            for index in 0..<16 {
+                let offset = chunkStart + index * 4
+                schedule[index] = (UInt32(msg[offset]) << 24) | (UInt32(msg[offset + 1]) << 16)
+                     | (UInt32(msg[offset + 2]) << 8) | UInt32(msg[offset + 3])
             }
-            for i in 16..<64 {
-                let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)
-                let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)
-                w[i] = w[i - 16] &+ s0 &+ w[i - 7] &+ s1
-            }
-
-            var a = h[0], b = h[1], c = h[2], d = h[3]
-            var e = h[4], f = h[5], g = h[6], hh = h[7]
-
-            for i in 0..<64 {
-                let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
-                let ch = (e & f) ^ (~e & g)
-                let t1 = hh &+ s1 &+ ch &+ k[i] &+ w[i]
-                let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
-                let maj = (a & b) ^ (a & c) ^ (b & c)
-                let t2 = s0 &+ maj
-                hh = g; g = f; f = e; e = d &+ t1
-                d = c; c = b; b = a; a = t1 &+ t2
+            for index in 16..<64 {
+                let sigma0 = rotr(schedule[index - 15], 7)
+                    ^ rotr(schedule[index - 15], 18)
+                    ^ (schedule[index - 15] >> 3)
+                let sigma1 = rotr(schedule[index - 2], 17) ^ rotr(schedule[index - 2], 19) ^ (schedule[index - 2] >> 10)
+                schedule[index] = schedule[index - 16] &+ sigma0 &+ schedule[index - 7] &+ sigma1
             }
 
-            h[0] = h[0] &+ a; h[1] = h[1] &+ b; h[2] = h[2] &+ c; h[3] = h[3] &+ d
-            h[4] = h[4] &+ e; h[5] = h[5] &+ f; h[6] = h[6] &+ g; h[7] = h[7] &+ hh
+            var stateA = hashState[0], stateB = hashState[1], stateC = hashState[2], stateD = hashState[3]
+            var stateE = hashState[4], stateF = hashState[5], stateG = hashState[6], stateH = hashState[7]
+
+            for index in 0..<64 {
+                let sigma1 = rotr(stateE, 6) ^ rotr(stateE, 11) ^ rotr(stateE, 25)
+                let choice = (stateE & stateF) ^ (~stateE & stateG)
+                let temp1 = stateH &+ sigma1 &+ choice &+ roundConstants[index] &+ schedule[index]
+                let sigma0 = rotr(stateA, 2) ^ rotr(stateA, 13) ^ rotr(stateA, 22)
+                let maj = (stateA & stateB) ^ (stateA & stateC) ^ (stateB & stateC)
+                let temp2 = sigma0 &+ maj
+                stateH = stateG; stateG = stateF; stateF = stateE; stateE = stateD &+ temp1
+                stateD = stateC; stateC = stateB; stateB = stateA; stateA = temp1 &+ temp2
+            }
+
+            hashState[0] = hashState[0] &+ stateA
+            hashState[1] = hashState[1] &+ stateB
+            hashState[2] = hashState[2] &+ stateC
+            hashState[3] = hashState[3] &+ stateD
+            hashState[4] = hashState[4] &+ stateE
+            hashState[5] = hashState[5] &+ stateF
+            hashState[6] = hashState[6] &+ stateG
+            hashState[7] = hashState[7] &+ stateH
         }
 
         var out = [UInt8]()
         out.reserveCapacity(32)
-        for value in h {
+        for value in hashState {
             out.append(UInt8((value >> 24) & 0xff))
             out.append(UInt8((value >> 16) & 0xff))
             out.append(UInt8((value >> 8) & 0xff))
@@ -191,142 +199,6 @@ enum SHA256Pure {
     }
 }
 #endif
-
-// MARK: - OAuth models
-
-/// A sourced, exact verified-email domain match, not proof of employment or endorsement.
-public struct CompanyAffiliation: Codable, Sendable, Equatable {
-    public var companyName: String
-    public var fundingOrganization: String
-    public var relationship: String
-    public var domain: String
-    public var foundingYear: Int?
-    public var sourceURL: String
-    public var checkedAt: String
-    public var matchMethod: String
-
-    enum CodingKeys: String, CodingKey {
-        case relationship, domain
-        case companyName = "company_name"
-        case fundingOrganization = "funding_organization"
-        case foundingYear = "founding_year"
-        case sourceURL = "source_url"
-        case checkedAt = "checked_at"
-        case matchMethod = "match_method"
-    }
-
-    public init(
-        companyName: String, fundingOrganization: String, relationship: String,
-        domain: String, foundingYear: Int? = nil, sourceURL: String,
-        checkedAt: String, matchMethod: String
-    ) {
-        self.companyName = companyName
-        self.fundingOrganization = fundingOrganization
-        self.relationship = relationship
-        self.domain = domain
-        self.foundingYear = foundingYear
-        self.sourceURL = sourceURL
-        self.checkedAt = checkedAt
-        self.matchMethod = matchMethod
-    }
-}
-
-/// Verified identity attached to a delegated key, as returned by
-/// `/auth/keys` (`identity`) and embedded in `/auth/userinfo`.
-public struct OAuthIdentity: Codable, Sendable, Equatable {
-    public var sub: String
-    public var email: String?
-    public var emailVerified: Bool?
-    public var walletAddress: String?
-    public var companyAffiliations: [CompanyAffiliation]?
-
-    enum CodingKeys: String, CodingKey {
-        case sub, email
-        case emailVerified = "email_verified"
-        case walletAddress = "wallet_address"
-        case companyAffiliations = "company_affiliations"
-    }
-
-    public init(sub: String, email: String? = nil, emailVerified: Bool? = nil, walletAddress: String? = nil, companyAffiliations: [CompanyAffiliation]? = nil) {
-        self.sub = sub
-        self.email = email
-        self.emailVerified = emailVerified
-        self.walletAddress = walletAddress
-        self.companyAffiliations = companyAffiliations
-    }
-}
-
-/// Result of exchanging an authorization `code` for a delegated key.
-/// Mirrors the `/auth/keys` response: `{ key, user_id, identity, data }`.
-public struct OAuthToken: Codable, Sendable, Equatable {
-    /// The delegated key, e.g. `"sk-tr-v1-..."`. Use as the Bearer token for
-    /// subsequent gateway calls (including `/auth/userinfo`).
-    public var key: String
-    /// The owning user id, when the backend includes one.
-    public var userId: String?
-    /// Verified identity (`sub`/`email`/…), or `nil` for anonymous keys.
-    public var identity: OAuthIdentity?
-
-    enum CodingKeys: String, CodingKey {
-        case key
-        case userId = "user_id"
-        case identity
-        // `data` intentionally omitted: it's an opaque grab-bag the typed
-        // model doesn't need to surface. Decoding ignores unknown keys.
-    }
-
-    public init(key: String, userId: String? = nil, identity: OAuthIdentity? = nil) {
-        self.key = key
-        self.userId = userId
-        self.identity = identity
-    }
-}
-
-/// The `data` payload returned by `GET /auth/userinfo`.
-public struct UserInfo: Codable, Sendable, Equatable {
-    public var sub: String
-    public var email: String?
-    public var emailVerified: Bool?
-    public var walletAddress: String?
-    public var workspaceId: String?
-    /// ISO-8601 creation timestamp string (the backend returns a string here,
-    /// not an epoch number).
-    public var createdAt: String?
-    public var companyAffiliations: [CompanyAffiliation]?
-
-    enum CodingKeys: String, CodingKey {
-        case sub, email
-        case emailVerified = "email_verified"
-        case walletAddress = "wallet_address"
-        case workspaceId = "workspace_id"
-        case createdAt = "created_at"
-        case companyAffiliations = "company_affiliations"
-    }
-
-    public init(
-        sub: String,
-        email: String? = nil,
-        emailVerified: Bool? = nil,
-        walletAddress: String? = nil,
-        workspaceId: String? = nil,
-        createdAt: String? = nil,
-        companyAffiliations: [CompanyAffiliation]? = nil
-    ) {
-        self.sub = sub
-        self.email = email
-        self.emailVerified = emailVerified
-        self.walletAddress = walletAddress
-        self.workspaceId = workspaceId
-        self.createdAt = createdAt
-        self.companyAffiliations = companyAffiliations
-    }
-}
-
-/// Envelope for `GET /auth/userinfo`: `{ "data": { ... } }`.
-public struct UserInfoResponse: Codable, Sendable, Equatable {
-    public var data: UserInfo
-    public init(data: UserInfo) { self.data = data }
-}
 
 // MARK: - Authorize URL
 
@@ -612,11 +484,17 @@ public final class TrustedRouterOAuth {
                 callbackURLScheme: callbackScheme
             ) { callbackURL, error in
                 if let error {
-                    continuation.resume(throwing: TrustedRouterError.internalError("OAuth session failed: \(error.localizedDescription)"))
+                    continuation.resume(
+                        throwing: TrustedRouterError.internalError(
+                            "OAuth session failed: \(error.localizedDescription)"
+                        )
+                    )
                     return
                 }
                 guard let callbackURL else {
-                    continuation.resume(throwing: TrustedRouterError.internalError("OAuth session returned no callback URL"))
+                    continuation.resume(
+                        throwing: TrustedRouterError.internalError("OAuth session returned no callback URL")
+                    )
                     return
                 }
                 continuation.resume(returning: callbackURL)
@@ -624,7 +502,9 @@ public final class TrustedRouterOAuth {
             session.presentationContextProvider = presentationContextProvider
             session.prefersEphemeralWebBrowserSession = prefersEphemeralWebBrowserSession
             if !session.start() {
-                continuation.resume(throwing: TrustedRouterError.internalError("could not start ASWebAuthenticationSession"))
+                continuation.resume(
+                    throwing: TrustedRouterError.internalError("could not start ASWebAuthenticationSession")
+                )
             }
         }
     }

@@ -159,6 +159,9 @@ extension TrustedRouter {
         provider: ProviderPreferences? = nil
     ) async throws -> ChatCompletion {
         var body = params
+        if let suppliedTools = body["tools"], !(suppliedTools is [[String: Any]]) {
+            throw TrustedRouterError.invalidResponse("tools must be an array of objects")
+        }
         var tools = (body["tools"] as? [[String: Any]]) ?? []
         tools.append(Self.fusionTool(
             analysisModels: analysisModels,

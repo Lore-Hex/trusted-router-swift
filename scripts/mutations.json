@@ -1,0 +1,128 @@
+[
+  {
+    "name": "exchange-data-shape",
+    "file": "Sources/TrustedRouter/OAuth/OAuthToken+Codable.swift",
+    "before": "data = try values.decodeIfPresent([String: JSONValue].self, forKey: .data)",
+    "after": "data = nil",
+    "test": "OAuthTests/testSharedAuthWireFixtures"
+  },
+  {
+    "name": "fixture-require-unguaranteed-data",
+    "file": "Sources/TrustedRouter/OAuth/OAuthToken+Codable.swift",
+    "before": "data = try values.decodeIfPresent([String: JSONValue].self, forKey: .data)",
+    "after": "data = try values.decode([String: JSONValue].self, forKey: .data)",
+    "test": "OAuthTests/testSharedAuthWireFixtures"
+  },
+  {
+    "name": "legacy-null-sub",
+    "file": "Sources/TrustedRouter/OAuth/UserInfo+Codable.swift",
+    "before": "sub = try values.decodeIfPresent(String.self, forKey: .sub)",
+    "after": "sub = try values.decode(String.self, forKey: .sub)",
+    "test": "OAuthTests/testSharedAuthWireFixtures"
+  },
+  {
+    "name": "unknown-fields-pass-through",
+    "file": "Sources/TrustedRouter/OAuth/OAuthFields.swift",
+    "before": "return object.filter { !known.contains($0.key) }",
+    "after": "return [:]",
+    "test": "OAuthTests/testSharedAuthWireFixtures"
+  },
+  {
+    "name": "unknown-affiliation-pass-through",
+    "file": "Sources/TrustedRouter/OAuth/CompanyAffiliation+Codable.swift",
+    "before": "additionalFields = try oauthAdditionalFields(from: decoder, knownKeys: CodingKeys.allCases)",
+    "after": "additionalFields = [:]",
+    "test": "OAuthTests/testUnknownAffiliationFieldsPassThrough"
+  },
+  {
+    "name": "der-data-indices",
+    "file": "Sources/TrustedRouter/Attestation/DER.swift",
+    "before": "var bytes = Array(unsigned)",
+    "after": "var bytes = unsigned",
+    "test": "DERTests/testIntegerNormalizesMultipleZerosAndSlicedData"
+  },
+  {
+    "name": "case-insensitive-headers",
+    "file": "Sources/TrustedRouter/Transport/RetryPolicy.swift",
+    "before": "response.value(forHTTPHeaderField: name)",
+    "after": "response.allHeaderFields[name] as? String",
+    "test": "HeaderMergeTests/testResponseHeadersAcceptArbitraryCasing"
+  },
+  {
+    "name": "status-object-shape",
+    "file": "Sources/TrustedRouter/Endpoints/TrustedRouter+Account.swift",
+    "before": "throw TrustedRouterError.invalidResponse(\"Status response must be a JSON object\")",
+    "after": "return [:]",
+    "test": "TrustedRouterEndpointTests/testStatusRejectsNonObjectJSON"
+  },
+  {
+    "name": "fusion-tools-shape",
+    "file": "Sources/TrustedRouter/Orchestration/ToolBuilders.swift",
+    "before": "if let suppliedTools = body[\"tools\"], !(suppliedTools is [[String: Any]]) {",
+    "after": "if false, let suppliedTools = body[\"tools\"], !(suppliedTools is [[String: Any]]) {",
+    "test": "FusionTests/testFusionRejectsMalformedToolsBeforeSending"
+  },
+  {
+    "name": "trust-release-field-validation",
+    "file": "Sources/TrustedRouter/Attestation/Attestation.swift",
+    "before": "try validateImageFields(rel, lists: true)",
+    "after": "// mutation: omit trust release validation",
+    "test": "AttestationPolicyPropertyTests/testMalformedPublishedPinsCannotHideBehindAValidPin"
+  },
+  {
+    "name": "claim-image-field-validation",
+    "file": "Sources/TrustedRouter/Attestation/ImageBoundary.swift",
+    "before": "try validateImageFields(container)",
+    "after": "// mutation: omit image field validation",
+    "test": "AttestationPolicyPropertyTests/testMalformedClaimImageFieldsAreRejected"
+  },
+  {
+    "name": "claim-submods-shape",
+    "file": "Sources/TrustedRouter/Attestation/ImageBoundary.swift",
+    "before": "throw AttestationVerificationError(\"submods must be an object\")",
+    "after": "return [:]",
+    "test": "AttestationPolicyPropertyTests/testMalformedClaimImageFieldsAreRejected"
+  },
+  {
+    "name": "claim-container-shape",
+    "file": "Sources/TrustedRouter/Attestation/ImageBoundary.swift",
+    "before": "throw AttestationVerificationError(\"container must be an object\")",
+    "after": "return [:]",
+    "test": "AttestationPolicyPropertyTests/testMalformedClaimImageFieldsAreRejected"
+  },
+  {
+    "name": "claim-validator-hookup",
+    "file": "Sources/TrustedRouter/Attestation/Attestation.swift",
+    "before": "let container = try imageContainer(in: claims)",
+    "after": "let container = (claims[\"submods\"] as? [String: Any])?[\"container\"] as? [String: Any] ?? [:]",
+    "test": "AttestationPolicyPropertyTests/testMalformedClaimImageFieldsAreRejected"
+  },
+  {
+    "name": "unsupported-rs256-fails-closed",
+    "file": "Sources/TrustedRouter/Attestation/ImageBoundary.swift",
+    "before": "throw AttestationVerificationError(\"RS256 signature verification requires Security on this platform\")",
+    "after": "return",
+    "test": "AttestationPolicyPropertyTests/testUnsupportedSignatureVerificationFailsClosed"
+  },
+  {
+    "name": "raw-claim-boolean",
+    "file": "Sources/TrustedRouter/Attestation/Attestation.swift",
+    "before": "if let boolean = attestationBoolean(any) { return .bool(boolean) }",
+    "after": "// mutation: boolean falls through to Double",
+    "test": "AttestationPolicyPropertyTests/testJSONBooleanClaimsKeepTheirType"
+  },
+  {
+    "name": "secure-boot-boolean",
+    "file": "Sources/TrustedRouter/Attestation/Attestation.swift",
+    "before": "attestationBoolean(claims[\"secboot\"]) != true",
+    "after": "claims[\"secboot\"] as? Bool != true",
+    "test": "AttestationPolicyPropertyTests/testNumericSecureBootIsRejected"
+  },
+  {
+    "name": "receipt-stream-data-indices",
+    "file": "Sources/TrustedRouter/Receipts/ReceiptVerification.swift",
+    "before": "let stream = Data(suppliedStream)",
+    "after": "let stream = suppliedStream",
+    "test": "ReceiptVerificationTests/testStreamVerificationAcceptsNonzeroDataIndices"
+  }
+]

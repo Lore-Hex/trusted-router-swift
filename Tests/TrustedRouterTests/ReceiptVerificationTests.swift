@@ -630,6 +630,15 @@ final class ReceiptVerificationTests: XCTestCase {
         }
     }
 
+    func testStreamVerificationAcceptsNonzeroDataIndices() async throws {
+        let generated = try makeStreamReceipt()
+        let prefixed = Data([0xff]) + generated.stream
+        let sliced = prefixed.dropFirst()
+        XCTAssertNotEqual(sliced.startIndex, 0)
+        let verified = try await verifyStream(generated.receipt.raw, stream: sliced)
+        XCTAssertEqual(verified.jti, "chatcmpl-test")
+    }
+
     func testReceiptCapturePreservesWireAndVerifies() async throws {
         let generated = try makeStreamReceipt()
         let source = TrustedRouterByteStream { continuation in

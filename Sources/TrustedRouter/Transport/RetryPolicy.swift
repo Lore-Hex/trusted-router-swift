@@ -60,10 +60,7 @@ import FoundationNetworking
 enum RetryPolicy {
 
     static func header(_ response: HTTPURLResponse, _ name: String) -> String? {
-        for candidate in [name, name.lowercased(), name.capitalized] {
-            if let raw = response.allHeaderFields[candidate] as? String { return raw }
-        }
-        return nil
+        response.value(forHTTPHeaderField: name)
     }
 
     /// Ceiling on a server-supplied Retry-After floor, in seconds.

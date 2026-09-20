@@ -80,7 +80,8 @@ public final class TrustedRouter: Sendable {
         // Strip any trailing slashes so the path-join in `requestURLString`
         // doesn't emit a double-slash URL.
         self.baseUrl = trimTrailingSlashes(options.baseUrl ?? TrustedRouterConstants.defaultAPIBaseURL)
-        self.controlBaseURL = trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
+        self.controlBaseURL =
+            trimTrailingSlashes(options.controlBaseURL ?? TrustedRouterConstants.defaultControlBaseURL)
         self.urlSession = options.urlSession
         self.transportURLSession = options.urlSession.trustedRouterTransportCopy()
         self.credentialFreeURLSession = options.urlSession.trustedRouterCredentialFreeCopy()
@@ -242,8 +243,8 @@ public final class TrustedRouter: Sendable {
         // is seeded per process, and letting it pick the survivor among
         // same-layer case-variants would reintroduce (rarer) nondeterminism.
         var out = ["user-agent": TrustedRouter.userAgent]
-        for (k, v) in self.defaultHeaders.sorted(by: { $0.key < $1.key }) {
-            Self.setHeader(&out, name: k, value: v)
+        for (name, value) in self.defaultHeaders.sorted(by: { $0.key < $1.key }) {
+            Self.setHeader(&out, name: name, value: value)
         }
         // Credential scoping, part 1 (see Transport/CredentialScope.swift):
         // client-wide default headers are configured once, for the client's
@@ -263,13 +264,13 @@ public final class TrustedRouter: Sendable {
         // origin. Callers who must authenticate to a host the client is not
         // configured for use these (or construct a client with that base).
         if let headers = headers {
-            for (k, v) in headers.sorted(by: { $0.key < $1.key }) {
-                Self.setHeader(&out, name: k, value: v)
+            for (name, value) in headers.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: name, value: value)
             }
         }
         if let extraHeaders = extraHeaders {
-            for (k, v) in extraHeaders.sorted(by: { $0.key < $1.key }) {
-                Self.setHeader(&out, name: k, value: v)
+            for (name, value) in extraHeaders.sorted(by: { $0.key < $1.key }) {
+                Self.setHeader(&out, name: name, value: value)
             }
         }
         // x-tr-client assembly (client-telemetry contract v1 §6.1: this is
@@ -343,11 +344,11 @@ public final class TrustedRouter: Sendable {
         body: Data? = nil,
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference,
-        _baseURLOverride: String? = nil
+        _baseURLOverride baseURLOverride: String? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         let selectedBaseURL: String?
-        if _baseURLOverride != nil || !usesInferenceBase(path: path, plane: plane) {
-            selectedBaseURL = _baseURLOverride
+        if baseURLOverride != nil || !usesInferenceBase(path: path, plane: plane) {
+            selectedBaseURL = baseURLOverride
         } else {
             selectedBaseURL = await inferenceBaseURLs().first
         }
@@ -437,7 +438,7 @@ public final class TrustedRouter: Sendable {
         options: PerCallOptions = PerCallOptions(),
         plane: TrustedRouterRequestPlane = .inference
     ) async throws -> T {
-        var bodyData: Data? = nil
+        var bodyData: Data?
         if let body = body {
             if let data = body as? Data {
                 bodyData = data
@@ -464,16 +465,14 @@ public final class TrustedRouter: Sendable {
             throw classifyError(statusCode: response.statusCode, data: data, response: response)
         }
 
-        if T.self == Data.self {
-            return data as! T
+        if T.self == Data.self, let rawData = data as? T {
+            return rawData
         }
 
         if data.isEmpty {
             // For Void or empty responses, we might need a better way.
             // For now we'll try to decode empty JSON.
-            if let emptyObj = "{}" .data(using: .utf8) {
-                return try JSONDecoder().decode(T.self, from: emptyObj)
-            }
+            return try JSONDecoder().decode(T.self, from: Data("{}".utf8))
         }
 
         return try JSONDecoder().decode(T.self, from: data)

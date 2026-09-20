@@ -97,7 +97,8 @@ extension ClientTelemetry {
 
     static func validModel(_ value: String?) -> String? {
         guard let value, !value.isEmpty, value.utf8.count <= 128 else { return nil }
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/~@-")
+        let allowed =
+            CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:/~@-")
         return value.unicodeScalars.allSatisfy(allowed.contains) ? value : nil
     }
 
@@ -135,9 +136,13 @@ struct TelemetryAttemptRecord: Sendable {
             "http_status": httpStatus.map { ClientTelemetry.boundedInt($0, minimum: 100, maximum: 599) } ?? NSNull(),
             "error_class": errorClass.flatMap { ClientTelemetry.errorClasses.contains($0) ? $0 : nil } ?? NSNull(),
             "error_source": boundedErrorSource,
-            "retry_after_ms": retryAfterMs.map { ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs) } ?? NSNull(),
+            "retry_after_ms": retryAfterMs.map {
+                ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs)
+            } ?? NSNull(),
             "elapsed_ms": ClientTelemetry.boundedInt(elapsedMs, minimum: 0, maximum: ClientTelemetry.maxDurationMs),
-            "ttfb_ms": ttfbMs.map { ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs) } ?? NSNull(),
+            "ttfb_ms": ttfbMs.map {
+                ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs)
+            } ?? NSNull(),
             "request_id": ClientTelemetry.validRequestID(requestID) ?? NSNull(),
             "moved": moved
         ]
@@ -169,9 +174,13 @@ struct TelemetryRequestEvent: Sendable {
         guard !attemptValues.isEmpty, ["GET", "POST"].contains(method) else { return nil }
         let rawAge = (now - completedAt) * 1_000.0
         let age: Int
-        if !rawAge.isFinite || rawAge <= 0 { age = 0 }
-        else if rawAge >= 86_400_000 { age = 86_400_000 }
-        else { age = Int(rawAge) }
+        if !rawAge.isFinite || rawAge <= 0 {
+            age = 0
+        } else if rawAge >= 86_400_000 {
+            age = 86_400_000
+        } else {
+            age = Int(rawAge)
+        }
         let rate = sampleRate.isFinite ? min(1, max(0, sampleRate)) : 0
         guard rate > 0, ["failure", "retried", "slow", "random"].contains(sampleReason) else {
             return nil
@@ -187,12 +196,18 @@ struct TelemetryRequestEvent: Sendable {
             "model": ClientTelemetry.validModel(model) ?? NSNull(),
             "attempts": attemptValues,
             "final_outcome": ClientTelemetry.finalOutcomes.contains(finalOutcome) ? finalOutcome : fallbackOutcome,
-            "final_http_status": finalHTTPStatus.map { ClientTelemetry.boundedInt($0, minimum: 100, maximum: 599) } ?? NSNull(),
+            "final_http_status": finalHTTPStatus.map {
+                ClientTelemetry.boundedInt($0, minimum: 100, maximum: 599)
+            } ?? NSNull(),
             "total_ms": ClientTelemetry.boundedInt(totalMs, minimum: 0, maximum: ClientTelemetry.maxDurationMs),
-            "ttft_ms": ttftMs.map { ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs) } ?? NSNull(),
+            "ttft_ms": ttftMs.map {
+                ClientTelemetry.boundedInt($0, minimum: 0, maximum: ClientTelemetry.maxDurationMs)
+            } ?? NSNull(),
             "failover_used": failoverUsed,
             "timeout_phase": ClientTelemetry.timeoutPhases.contains(timeoutPhase) ? timeoutPhase : "none",
-            "configured_timeout_ms": configuredTimeoutMs.map { ClientTelemetry.boundedInt($0, minimum: 1, maximum: ClientTelemetry.maxDurationMs) } ?? NSNull(),
+            "configured_timeout_ms": configuredTimeoutMs.map {
+                ClientTelemetry.boundedInt($0, minimum: 1, maximum: ClientTelemetry.maxDurationMs)
+            } ?? NSNull(),
             "sample_rate": rate,
             "sample_reason": sampleReason
         ]
@@ -671,9 +686,13 @@ final class TelemetryReporter: @unchecked Sendable {
 
     private func finiteDouble(_ value: Any?) -> Double? {
         let parsed: Double?
-        if let number = value as? NSNumber { parsed = number.doubleValue }
-        else if let string = value as? String { parsed = Double(string) }
-        else { parsed = nil }
+        if let number = value as? NSNumber {
+            parsed = number.doubleValue
+        } else if let string = value as? String {
+            parsed = Double(string)
+        } else {
+            parsed = nil
+        }
         guard let parsed, parsed.isFinite else { return nil }
         return parsed
     }
@@ -805,7 +824,8 @@ final class TelemetryReporter: @unchecked Sendable {
             "requests": ClientTelemetry.boundedInt(value.requests, minimum: 1, maximum: 10_000_000),
             "attempts": ClientTelemetry.boundedInt(value.attempts, minimum: 0, maximum: 10_000_000),
             "failover_used": ClientTelemetry.boundedInt(value.failoverUsed, minimum: 0, maximum: 10_000_000),
-            "first_attempt_success": ClientTelemetry.boundedInt(value.firstAttemptSuccess, minimum: 0, maximum: 10_000_000),
+            "first_attempt_success": ClientTelemetry.boundedInt(value.firstAttemptSuccess,
+                minimum: 0, maximum: 10_000_000),
             "total_ms_hist": boundedHistogram(value.totalMsHistogram),
             "first_event_ms_hist": boundedHistogram(value.firstEventMsHistogram)
         ]
@@ -875,9 +895,13 @@ final class TelemetryReporter: @unchecked Sendable {
         let dropped = droppedSinceLast
         let wall = wallClock() * 1_000.0
         let sentAt: Int
-        if !wall.isFinite || wall <= 0 { sentAt = 0 }
-        else if wall >= Double(Int.max) { sentAt = Int.max }
-        else { sentAt = Int(wall) }
+        if !wall.isFinite || wall <= 0 {
+            sentAt = 0
+        } else if wall >= Double(Int.max) {
+            sentAt = Int.max
+        } else {
+            sentAt = Int(wall)
+        }
         var body: [String: Any] = [
             "schema_version": ClientTelemetry.schemaVersion,
             "batch_id": Self.hexID(),
@@ -914,19 +938,19 @@ final class TelemetryReporter: @unchecked Sendable {
 
     private static func sdkIdentity() -> [String: String] {
         #if os(macOS)
-        let os = "macos"
+        let operatingSystem = "macos"
         #elseif os(iOS)
-        let os = "ios"
+        let operatingSystem = "ios"
         #elseif os(Linux)
-        let os = "linux"
+        let operatingSystem = "linux"
         #elseif os(Windows)
-        let os = "windows"
+        let operatingSystem = "windows"
         #elseif os(Android)
-        let os = "android"
+        let operatingSystem = "android"
         #elseif os(FreeBSD)
-        let os = "freebsd"
+        let operatingSystem = "freebsd"
         #else
-        let os = "other"
+        let operatingSystem = "other"
         #endif
         #if arch(x86_64)
         let arch = "x64"
@@ -945,7 +969,7 @@ final class TelemetryReporter: @unchecked Sendable {
             ? TrustedRouterConstants.version : "0.0.0"
         return [
             "name": "tr-swift", "version": version, "lang": "swift",
-            "runtime": TrustedRouterConstants.runtime, "os": os, "arch": arch
+            "runtime": TrustedRouterConstants.runtime, "os": operatingSystem, "arch": arch
         ]
     }
 

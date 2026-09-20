@@ -287,3 +287,89 @@ final class OAuthTests: XCTestCase {
     }
     #endif
 }
+
+extension OAuthTests {
+    private struct WireCases: Decodable {
+        let accept: [String: JSONValue]
+        let reject: [String: JSONValue]
+    }
+
+    private struct AuthWireFixture: Decodable {
+        let exchange: WireCases
+        let userinfo: WireCases
+    }
+
+    func testSharedAuthWireFixtures() async throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "auth-wire-fixtures", withExtension: "json"))
+        let fixture = try JSONDecoder().decode(AuthWireFixture.self, from: Data(contentsOf: url))
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        for (endpoint, cases) in [("exchange", fixture.exchange), ("userinfo", fixture.userinfo)] {
+            for (accepted, payloads) in [(true, cases.accept), (false, cases.reject)] {
+                for (name, payload) in payloads.sorted(by: { $0.key < $1.key }) {
+                    let bytes = try JSONEncoder().encode(payload)
+                    MockURLProtocol.requestHandler = { request in
+                        XCTAssertEqual(request.httpMethod, endpoint == "exchange" ? "POST" : "GET")
+                        XCTAssertEqual(request.url?.path, endpoint == "exchange" ? "/v1/auth/keys" : "/v1/auth/userinfo")
+                        let response = try XCTUnwrap(HTTPURLResponse(
+                            url: try XCTUnwrap(request.url), statusCode: 200,
+                            httpVersion: "HTTP/1.1", headerFields: nil
+                        ))
+                        return (response, bytes)
+                    }
+                    do {
+                        let actual: JSONValue
+                        if endpoint == "exchange" {
+                            let token = try await exchangeOAuthKey(
+                                code: "fixture-code", baseURL: "https://control.test/v1", urlSession: session
+                            )
+                            guard case .object(let expected) = payload else {
+                                XCTFail("accepted non-object: \(name)"); continue
+                            }
+                            XCTAssertEqual(JSONValue.string(token.key), expected["key"], name)
+                            actual = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(token))
+                        } else {
+                            let info = try await fetchUserInfo(
+                                apiKey: "fixture-key", baseURL: "https://control.test/v1", urlSession: session
+                            )
+                            actual = .object(["data": try JSONDecoder().decode(
+                                JSONValue.self, from: JSONEncoder().encode(info)
+                            )])
+                        }
+                        XCTAssertTrue(accepted, "accepted reject case \(endpoint)/\(name)")
+                        assertWireFields(payload, surviveIn: actual, context: "\(endpoint)/\(name)")
+                    } catch is DecodingError {
+                        XCTAssertFalse(accepted, "rejected accept case \(endpoint)/\(name)")
+                    } catch {
+                        XCTFail("unexpected error for \(endpoint)/\(name): \(error)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func assertWireFields(_ expected: JSONValue, surviveIn actual: JSONValue, context: String) {
+        if case .object(let expectedFields) = expected, case .object(let actualFields) = actual {
+            for (key, value) in expectedFields {
+                // Codable optional known fields may encode JSON null as absence.
+                if value == .null, actualFields[key] == nil { continue }
+                guard let actualValue = actualFields[key] else {
+                    XCTFail("lost field \(context).\(key)"); continue
+                }
+                assertWireFields(value, surviveIn: actualValue, context: "\(context).\(key)")
+            }
+        } else {
+            XCTAssertEqual(expected, actual, context)
+        }
+    }
+
+    func testUnknownAffiliationFieldsPassThrough() throws {
+        let bytes = Data(#"{"sub":"u","company_affiliations":[{"company_name":"Example","funding_organization":"YC","relationship":"accelerator","domain":"example.com","source_url":"https://example.com","checked_at":"today","match_method":"verified_email_domain","future":null}]}"#.utf8)
+        let identity = try JSONDecoder().decode(OAuthIdentity.self, from: bytes)
+        XCTAssertEqual(identity.companyAffiliations?.first?.additionalFields["future"], .null)
+        let roundTrip = try JSONDecoder().decode(OAuthIdentity.self, from: JSONEncoder().encode(identity))
+        XCTAssertEqual(identity, roundTrip)
+    }
+}

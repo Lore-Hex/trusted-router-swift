@@ -309,3 +309,25 @@ private func requestBodyData(_ request: URLRequest) throws -> Data {
     }
     return data
 }
+
+extension TrustedRouterEndpointTests {
+    func testStatusRejectsNonObjectJSON() async throws {
+        for body in ["[]", "null", "7", #""text""#] {
+            MockURLProtocol.requestHandler = { request in
+                let response = try XCTUnwrap(HTTPURLResponse(
+                    url: try XCTUnwrap(request.url), statusCode: 200,
+                    httpVersion: "HTTP/1.1", headerFields: nil
+                ))
+                return (response, Data(body.utf8))
+            }
+            do {
+                _ = try await router.status(url: "https://status.test")
+                XCTFail("accepted \(body)")
+            } catch TrustedRouterError.invalidResponse {
+                // Expected typed boundary failure.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+        }
+    }
+}

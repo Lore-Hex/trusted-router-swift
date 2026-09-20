@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import TrustedRouter
 
@@ -159,6 +160,124 @@ final class AttestationPolicyPropertyTests: XCTestCase {
                     }
                 }
             }
+        }
+    }
+}
+
+extension AttestationPolicyPropertyTests {
+    func testMalformedPublishedPinsCannotHideBehindAValidPin() async throws {
+        for field in ["image_digest", "image_reference", "accepted_image_digests", "accepted_image_references"] {
+            let malformedValues: [Any] = [NSNull(), 7, [1], ["unexpected": "object"]]
+            for value in malformedValues {
+                var release: [String: Any] = ["image_digest": "sha256:valid", "image_reference": "image:valid"]
+                release[field] = value
+                do {
+                    _ = try await policyFromTrustRelease(release: release)
+                    XCTFail("accepted malformed \(field)")
+                } catch is AttestationVerificationError {
+                    // Expected; another valid pin must not mask malformed trust material.
+                } catch {
+                    XCTFail("unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testMalformedClaimImageFieldsAreRejected() async throws {
+        let malformedClaims: [[String: Any]] = [
+            ["submods": []], ["submods": NSNull()],
+            ["submods": ["container": []]], ["submods": ["container": NSNull()]],
+            ["submods": ["container": ["image_digest": 7, "image_reference": "valid"]]],
+            ["submods": ["container": ["image_digest": "valid", "image_reference": NSNull()]]]
+        ]
+        for claims in malformedClaims {
+            XCTAssertThrowsError(try imageContainer(in: claims)) { error in
+                XCTAssertTrue(error is AttestationVerificationError)
+            }
+            var complete: [String: Any] = [
+                "exp": Int(Date().timeIntervalSince1970) + 3600, "iss": GCPIssuer,
+                "aud": "quill-cloud", "dbgstat": "disabled-since-boot",
+                "swname": "CONFIDENTIAL_SPACE", "secboot": true, "hwmodel": "GCP_AMD_SEV",
+                "tls_cert_sha256": String(repeating: "a", count: 64)
+            ]
+            complete.merge(claims) { _, new in new }
+            let payload = try JSONSerialization.data(withJSONObject: complete)
+            let jwt = "e30." + OAuthCrypto.base64URLEncode(payload) + ".AA"
+            do {
+                _ = try await verifyGatewayAttestation(
+                    document: Data(jwt.utf8), policy: AttestationPolicy(imageDigest: "valid"),
+                    jwks: [:], signatureVerifier: { _, _, _, _ in }
+                )
+                XCTFail("accepted malformed image claims through verifier")
+            } catch is AttestationVerificationError {
+                // The injected signature verifier isolates consumed-claims validation.
+            } catch {
+                XCTFail("unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(try imageContainer(in: [:]).count, 0)
+        XCTAssertEqual(try imageContainer(in: ["submods": ["container": ["image_digest": "valid"]]])["image_digest"] as? String, "valid")
+    }
+
+    func testUnsupportedSignatureVerificationFailsClosed() {
+        XCTAssertThrowsError(try requireSignatureVerificationSupport()) { error in
+            XCTAssertTrue(error is AttestationVerificationError)
+        }
+    }
+}
+
+extension AttestationPolicyPropertyTests {
+    func testJSONBooleanClaimsKeepTheirType() throws {
+        let object = try JSONSerialization.jsonObject(with: Data(#"{"flag":true,"count":1}"#.utf8))
+        guard case .dictionary(let fields) = SendableValue.from(any: object) else {
+            return XCTFail("expected object")
+        }
+        guard case .bool(true)? = fields["flag"] else { return XCTFail("boolean became a number") }
+        guard case .number(1)? = fields["count"] else { return XCTFail("number became a boolean") }
+    }
+
+    func testNumericSecureBootIsRejected() async throws {
+        let claims: [String: Any] = [
+            "exp": Int(Date().timeIntervalSince1970) + 3600, "iss": GCPIssuer,
+            "aud": "quill-cloud", "dbgstat": "disabled-since-boot", "swname": "CONFIDENTIAL_SPACE",
+            "secboot": 1, "hwmodel": "GCP_AMD_SEV", "tls_cert_sha256": String(repeating: "a", count: 64),
+            "submods": ["container": ["image_digest": "valid"]]
+        ]
+        let payload = try JSONSerialization.data(withJSONObject: claims)
+        let jwt = "e30." + OAuthCrypto.base64URLEncode(payload) + ".AA"
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data(jwt.utf8), policy: AttestationPolicy(imageDigest: "valid"),
+                jwks: [:], signatureVerifier: { _, _, _, _ in }
+            )
+            XCTFail("numeric secure-boot evidence was accepted")
+        } catch let error as AttestationVerificationError {
+            XCTAssertTrue(error.message.contains("Secure Boot"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testUnsignedJWTIsRejectedOnEveryPlatform() async throws {
+        let claims: [String: Any] = [
+            "exp": Int(Date().timeIntervalSince1970) + 3600, "iss": GCPIssuer,
+            "aud": "quill-cloud", "dbgstat": "disabled-since-boot", "swname": "CONFIDENTIAL_SPACE",
+            "secboot": true, "hwmodel": "GCP_AMD_SEV", "tls_cert_sha256": String(repeating: "a", count: 64),
+            "submods": ["container": ["image_digest": "valid"]]
+        ]
+        let header = OAuthCrypto.base64URLEncode(Data(#"{"alg":"RS256","kid":"test"}"#.utf8))
+        let payload = OAuthCrypto.base64URLEncode(try JSONSerialization.data(withJSONObject: claims))
+        do {
+            _ = try await verifyGatewayAttestation(
+                document: Data("\(header).\(payload).AA".utf8),
+                policy: AttestationPolicy(imageDigest: "valid"),
+                jwks: ["keys": [["kid": "test", "kty": "RSA", "n": "AQ", "e": "AQAB"]]]
+            )
+            XCTFail("unsigned JWT was accepted")
+        } catch is AttestationVerificationError {
+            // Security verifies and rejects on Apple; unsupported platforms refuse verification.
+        } catch {
+            XCTFail("unexpected error: \(error)")
         }
     }
 }

@@ -18,7 +18,7 @@ public struct GatewayAttestation: Sendable {
     public var issuer: String?
     public var audience: String
     public var rawClaims: [String: SendableValue]
-    
+
     public init(
         certSha256: String,
         imageDigest: String,
@@ -48,15 +48,15 @@ public enum SendableValue: Sendable {
     case array([SendableValue])
     case dictionary([String: SendableValue])
     case null
-    
+
     static func from(any: Any?) -> SendableValue {
         guard let any = any else { return .null }
-        if let s = any as? String { return .string(s) }
-        if let n = any as? Double { return .number(n) }
-        if let n = any as? Int { return .number(Double(n)) }
-        if let b = any as? Bool { return .bool(b) }
-        if let a = any as? [Any] { return .array(a.map { from(any: $0) }) }
-        if let d = any as? [String: Any] { return .dictionary(d.mapValues { from(any: $0) }) }
+        if let string = any as? String { return .string(string) }
+        if let boolean = attestationBoolean(any) { return .bool(boolean) }
+        if let number = any as? Double { return .number(number) }
+        if let number = any as? Int { return .number(Double(number)) }
+        if let array = any as? [Any] { return .array(array.map { from(any: $0) }) }
+        if let dictionary = any as? [String: Any] { return .dictionary(dictionary.mapValues { from(any: $0) }) }
         return .null
     }
 }
@@ -112,7 +112,8 @@ public struct AttestationVerificationError: Error, LocalizedError, CustomStringC
 }
 
 public let GCPIssuer = "https://confidentialcomputing.googleapis.com"
-public let GCPJwksURI = "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com"
+public let GCPJwksURI =
+    "https://www.googleapis.com/service_accounts/v1/metadata/jwk/signer@confidentialspace-sign.iam.gserviceaccount.com"
 public let exporterLabel = "EXPORTER-Channel-Binding"
 public let exporterLength = 32
 
@@ -126,40 +127,48 @@ private func constantTimeEquals(_ lhs: String, _ rhs: String) -> Bool {
     let lhsBytes = Array(lhs.utf8)
     let rhsBytes = Array(rhs.utf8)
     var difference = lhsBytes.count ^ rhsBytes.count
-    for i in 0..<max(lhsBytes.count, rhsBytes.count) {
-        let l = i < lhsBytes.count ? lhsBytes[i] : 0
-        let r = i < rhsBytes.count ? rhsBytes[i] : 0
-        difference |= Int(l ^ r)
+    for index in 0..<max(lhsBytes.count, rhsBytes.count) {
+        let left = index < lhsBytes.count ? lhsBytes[index] : 0
+        let right = index < rhsBytes.count ? rhsBytes[index] : 0
+        difference |= Int(left ^ right)
     }
     return difference == 0
 }
 
 extension TrustedRouter {
     public func attestation() async throws -> Data {
-        let urlString = self.baseUrl.replacingOccurrences(of: "/v1$", with: "", options: .regularExpression) + "/attestation"
+        let urlString =
+            self.baseUrl.replacingOccurrences(of: "/v1$", with: "", options: .regularExpression) + "/attestation"
         guard let url = URL(string: urlString) else {
             throw TrustedRouterError.internalError("Invalid attestation URL: \(urlString)")
         }
         var req = URLRequest(url: url)
         req.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
-        
+
         let (data, response) = try await credentialFreeURLSession
             .trustedRouterCredentialFreeData(for: req)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw TrustedRouterError.internalError("Non-HTTP response")
         }
         if !(200..<300).contains(httpResponse.statusCode) {
-            throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Attestation fetch failed", payload: nil)
+            throw TrustedRouterError.generic(
+                statusCode: httpResponse.statusCode, message: "Attestation fetch failed", payload: nil
+            )
         }
         return data
     }
-    
-    public func trustRelease(url: String = TrustedRouterConstants.defaultTrustReleaseURL) async throws -> [String: Any] {
+
+    public func trustRelease(
+        url: String = TrustedRouterConstants.defaultTrustReleaseURL
+    ) async throws -> [String: Any] {
         return try await fetchTrustRelease(trustUrl: url, urlSession: self.urlSession)
     }
 }
 
-public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultTrustReleaseURL, urlSession: URLSession = .shared) async throws -> [String: Any] {
+public func fetchTrustRelease(
+    trustUrl: String = TrustedRouterConstants.defaultTrustReleaseURL,
+    urlSession: URLSession = .shared
+) async throws -> [String: Any] {
     if let reservedName = ClientTelemetry.reservedHeaderInSessionDefaults(urlSession) {
         throw reservedTelemetrySessionDefaultError(reservedName, entryPoint: "fetchTrustRelease")
     }
@@ -168,14 +177,16 @@ public func fetchTrustRelease(trustUrl: String = TrustedRouterConstants.defaultT
     }
     var req = URLRequest(url: url)
     req.setValue(TrustedRouter.userAgent, forHTTPHeaderField: "user-agent")
-    
+
     let (data, response) = try await urlSession.trustedRouterCredentialFreeCopy()
         .trustedRouterCredentialFreeData(for: req)
     guard let httpResponse = response as? HTTPURLResponse else {
         throw TrustedRouterError.internalError("Non-HTTP response")
     }
     if !(200..<300).contains(httpResponse.statusCode) {
-        throw TrustedRouterError.generic(statusCode: httpResponse.statusCode, message: "Trust release fetch failed", payload: nil)
+        throw TrustedRouterError.generic(
+            statusCode: httpResponse.statusCode, message: "Trust release fetch failed", payload: nil
+        )
     }
     guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
         throw TrustedRouterError.internalError("Invalid JSON in trust release")
@@ -201,6 +212,7 @@ public func policyFromTrustRelease(
         }
         rel = try await fetchTrustRelease(trustUrl: trustReleaseUrl, urlSession: urlSession)
     }
+    try validateImageFields(rel, lists: true)
     let imageDigest = rel["image_digest"] as? String
     let publishedDigests = (rel["accepted_image_digests"] as? [String])?
         .filter { !$0.isEmpty } ?? []
@@ -384,24 +396,24 @@ private func verifiedJWTClaims(
     if parts.count != 3 {
         throw AttestationVerificationError("expected 3 JWT segments, got \(parts.count)")
     }
-    
+
     let hB64 = String(parts[0])
     let pB64 = String(parts[1])
     let sB64 = String(parts[2])
-    
+
     guard let headerData = b64urlDecode(hB64),
           let payloadData = b64urlDecode(pB64),
           let signatureData = b64urlDecode(sB64) else {
         throw AttestationVerificationError("invalid JWT encoding")
     }
-    
+
     guard let header = try JSONSerialization.jsonObject(with: headerData) as? [String: Any],
           let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else {
         throw AttestationVerificationError("invalid JWT JSON payload")
     }
-    
-    let signingInput = "\(hB64).\(pB64)".data(using: .utf8)!
-    
+
+    let signingInput = Data("\(hB64).\(pB64)".utf8)
+
     let activeJwks: [String: Any]
     if let jwks = jwks {
         activeJwks = jwks
@@ -441,23 +453,23 @@ private func verifyRS256(
     guard let keys = jwks["keys"] as? [[String: Any]] else {
         throw AttestationVerificationError("JWKS response missing keys array")
     }
-    
+
     guard let alg = header["alg"] as? String, alg == "RS256" else {
         throw AttestationVerificationError("unsupported JWT alg; expected RS256")
     }
-    
+
     guard let kid = header["kid"] as? String else {
         throw AttestationVerificationError("missing kid in header")
     }
-    
+
     guard let jwk = keys.first(where: { ($0["kid"] as? String) == kid }) else {
         throw AttestationVerificationError("no JWK with kid=\(kid) in JWKS")
     }
-    
+
     guard let kty = jwk["kty"] as? String, kty == "RSA" else {
         throw AttestationVerificationError("expected RSA key in JWKS")
     }
-    
+
     // Real RS256 signature verification via Security.framework.
     #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
     guard let nB64 = jwk["n"] as? String, let eB64 = jwk["e"] as? String,
@@ -467,11 +479,13 @@ private func verifyRS256(
     let pkcs1 = DER.rsaPublicKeyPKCS1(n: nData, e: eData)
     let attr: [String: Any] = [
         kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-        kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+        kSecAttrKeyClass as String: kSecAttrKeyClassPublic
     ]
     var error: Unmanaged<CFError>?
     guard let key = SecKeyCreateWithData(pkcs1 as CFData, attr as CFDictionary, &error) else {
-        throw AttestationVerificationError("failed to create public key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")")
+        throw AttestationVerificationError(
+            "failed to create public key: \(error?.takeRetainedValue().localizedDescription ?? "unknown")"
+        )
     }
     guard SecKeyVerifySignature(
         key,
@@ -482,6 +496,8 @@ private func verifyRS256(
     ) else {
         throw AttestationVerificationError("JWT signature verification failed")
     }
+    #else
+    try requireSignatureVerificationSupport()
     #endif
 }
 
@@ -526,14 +542,14 @@ private func checkClaims(
     if claims["swname"] as? String != "CONFIDENTIAL_SPACE" {
         throw AttestationVerificationError("attested workload is not running Confidential Space")
     }
-    if claims["secboot"] as? Bool != true {
+    if attestationBoolean(claims["secboot"]) != true {
         throw AttestationVerificationError("attested workload does not report Secure Boot")
     }
     let hardware = claims["hwmodel"] as? String ?? "missing"
     if !["GCP_AMD_SEV", "GCP_AMD_SEV_ES", "GCP_INTEL_TDX"].contains(hardware) {
         throw AttestationVerificationError("unsupported confidential hardware model \(hardware)")
     }
-    
+
     var audList: [String] = []
     if let audString = claims["aud"] as? String {
         audList.append(audString)
@@ -543,14 +559,15 @@ private func checkClaims(
     if !audList.contains(policy.audience) {
         throw AttestationVerificationError("audience \(policy.audience) not in JWT aud \(audList)")
     }
-    
-    var imageDigest = ""
-    var imageReference = ""
-    if let submods = claims["submods"] as? [String: Any], let container = submods["container"] as? [String: Any] {
-        imageDigest = container["image_digest"] as? String ?? ""
-        imageReference = container["image_reference"] as? String ?? ""
-    }
-    
+
+    let container = try imageContainer(in: claims)
+    // Invariant: imageContainer validated present fields; only absent, unpinned fields default.
+    // swiftlint:disable:next cast_string_default
+    let imageDigest = container["image_digest"] as? String ?? ""
+    // Invariant: imageContainer validated present fields; only absent, unpinned fields default.
+    // swiftlint:disable:next cast_string_default
+    let imageReference = container["image_reference"] as? String ?? ""
+
     guard policy.pinsImageIdentity else {
         // Defence in depth for hand-built policies: both image checks below are
         // guarded on a non-empty accepted list, so reaching them with nothing
@@ -564,15 +581,19 @@ private func checkClaims(
         ? policy.imageDigest.map { [$0] } ?? []
         : policy.imageDigests
     if !acceptedImageDigests.isEmpty && !acceptedImageDigests.contains(imageDigest) {
-        throw AttestationVerificationError("image_digest mismatch: workload=\(imageDigest), policy=\(acceptedImageDigests)")
+        throw AttestationVerificationError(
+            "image_digest mismatch: workload=\(imageDigest), policy=\(acceptedImageDigests)"
+        )
     }
     let acceptedImageReferences = policy.imageReferences.isEmpty
         ? policy.imageReference.map { [$0] } ?? []
         : policy.imageReferences
     if !acceptedImageReferences.isEmpty && !acceptedImageReferences.contains(imageReference) {
-        throw AttestationVerificationError("image_reference mismatch: workload=\(imageReference), policy=\(acceptedImageReferences)")
+        throw AttestationVerificationError(
+            "image_reference mismatch: workload=\(imageReference), policy=\(acceptedImageReferences)"
+        )
     }
-    
+
     let rawEatNonces = claims["eat_nonce"]
     var nonces: [String] = []
     if let nString = claims["eat_nonce"] as? String {
@@ -584,8 +605,8 @@ private func checkClaims(
     } else if let nArr = claims["nonces"] as? [String] {
         nonces.append(contentsOf: nArr)
     }
-    
-    var nonceMatch: String? = nil
+
+    var nonceMatch: String?
     if let nonceHex = nonceHex {
         let noncePresent: Bool
         switch bindingMode {
@@ -624,7 +645,7 @@ private func checkClaims(
             throw AttestationVerificationError("fresh nonce must differ from TLS exporter binding")
         }
     }
-    
+
     let lowerCertSha: String
     switch bindingMode {
     case .liveChannel:
@@ -633,11 +654,9 @@ private func checkClaims(
         #if canImport(CryptoKit)
         if certSha == nil, let tlsCertDer = tlsCertDer {
             let actual = SHA256.hash(data: tlsCertDer).compactMap { String(format: "%02x", $0) }.joined()
-            for n in nonces {
-                if n.lowercased() == actual {
-                    certSha = actual
-                    break
-                }
+            for nonce in nonces where nonce.lowercased() == actual {
+                certSha = actual
+                break
             }
         }
         #endif
@@ -664,7 +683,7 @@ private func checkClaims(
         // evidence about the verifier's current TLS connection.
         lowerCertSha = ""
     }
-    
+
     return GatewayAttestation(
         certSha256: lowerCertSha,
         imageDigest: imageDigest,

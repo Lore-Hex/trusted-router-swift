@@ -158,12 +158,13 @@ enum ClientTelemetry {
     static func hostEnum(_ baseURL: String) -> String {
         guard let pair = schemeHost(baseURL) else { return "custom" }
         if matches(pair, TrustedRouterConstants.defaultAPIBaseURL) { return "apex" }
-        for (aliasURL, name) in zip(TrustedRouterConstants.aliasAPIBaseURLs, ["ally", "uptime"]) {
-            if matches(pair, aliasURL) { return name }
+        for (aliasURL, name) in zip(TrustedRouterConstants.aliasAPIBaseURLs, ["ally", "uptime"])
+            where matches(pair, aliasURL) {
+            return name
         }
         let regions = ["us_central1", "us_east4", "europe_west4"]
-        for (regionURL, name) in zip(TrustedRouterConstants.regionBaseURLs, regions) {
-            if matches(pair, regionURL) { return name }
+        for (regionURL, name) in zip(TrustedRouterConstants.regionBaseURLs, regions) where matches(pair, regionURL) {
+            return name
         }
         if matches(pair, TrustedRouterConstants.defaultControlBaseURL) || isControlHost(baseURL) {
             return "control"

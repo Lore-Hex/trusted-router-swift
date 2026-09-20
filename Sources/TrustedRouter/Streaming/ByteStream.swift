@@ -32,8 +32,7 @@ extension TrustedRouter {
                 do {
                     try Task.checkCancellation()
                     let value = try await iterator.next()
-                    if value == nil { recorder.finish() }
-                    else { bodyStarted = true }
+                    if value == nil { recorder.finish() } else { bodyStarted = true }
                     return value
                 } catch is CancellationError {
                     recorder.onAborted()
@@ -101,6 +100,8 @@ extension TrustedRouter {
             if box.iterator == nil {
                 box.iterator = bytes.makeAsyncIterator()
             }
+            // Invariant: iterator is initialized immediately above.
+            // swiftlint:disable:next force_unwrapping
             return try await box.iterator!.next()
         })
     }

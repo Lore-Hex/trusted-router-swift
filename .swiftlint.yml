@@ -1,0 +1,53 @@
+included:
+  - Sources
+# Tests intentionally stay outside lint: existing XCTest fixtures use force unwraps
+# and IUOs for setup; production boundary operations have the strict gate below.
+opt_in_rules:
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+# force_cast and force_try are already in SwiftLint's default rule set.
+# discouraged_optional_collection remains off: nil and [] differ on the wire.
+# Keep the default rule set enabled, with project size limits for the existing
+# sequential crypto verifiers and telemetry state machines. These are style
+# limits, not exceptions to the four force-operation rules above.
+file_length:
+  warning: 1400
+  error: 1600
+function_body_length:
+  warning: 200
+  error: 240
+type_body_length:
+  warning: 650
+  error: 750
+cyclomatic_complexity:
+  warning: 40
+  error: 45
+function_parameter_count:
+  warning: 8
+  error: 10
+large_tuple:
+  warning: 3
+  error: 4
+nesting:
+  type_level: 3
+custom_rules:
+  raw_response_header_lookup:
+    name: Case-insensitive response headers
+    regex: '\.allHeaderFields\s*\['
+    message: Use value(forHTTPHeaderField:) so arbitrary HTTP header casing works.
+    severity: error
+  cast_string_default:
+    name: Consumed string type erasure
+    regex: 'as\?\s+String\s*\?\?\s*""'
+    message: Validate a present consumed field before defaulting an absent string.
+    severity: error
+  swallowed_json_decoding:
+    name: Swallowed JSON decoding
+    regex: 'try\?\s+JSONDecoder\(\)\.decode'
+    message: Propagate typed decoding errors for consumed response fields.
+    severity: error
+  empty_object_fallback:
+    name: Object shape erasure
+    regex: 'as\?\s+\[String:\s*Any\]\)?\s*\?\?\s*\[:\]'
+    message: Reject malformed consumed objects instead of returning an empty object.
+    severity: error

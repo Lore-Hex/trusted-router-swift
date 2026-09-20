@@ -93,7 +93,7 @@ public enum SSEParser {
     }
 
     fileprivate static func parseFrame(_ frame: String) -> SSEEvent? {
-        var currentEvent: String? = nil
+        var currentEvent: String?
         var dataParts: [String] = []
 
         let lines = frame.components(separatedBy: .newlines)
