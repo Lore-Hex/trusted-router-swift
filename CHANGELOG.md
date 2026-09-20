@@ -1,12 +1,44 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-09-20
 
 - Receipt verification now fails closed: every verification requires a
   caller-pinned canonical HTTPS issuer, and request plus response bindings are
   required by default. `requireBindings: false` is the explicit
   signature-only or partial-binding escape hatch. Missing traffic bindings and
   issuer failures have dedicated typed errors.
+
+- Offline signed inference receipt verification: `verifyReceipt` accepts a
+  compact or flattened JWS and fails closed with typed errors — structure
+  (duplicate JSON members rejected), header, Ed25519 signature via CryptoKit
+  `Curve25519.Signing` (macOS 10.15+/iOS 13+; Linux builds compile behind
+  `canImport(CryptoKit)`), `rv`/`iat`, nonce, tee-verified claims, and both
+  captured-stream hash domains. `ReceiptCapture` preserves exact wire bytes
+  from a streaming response. The enclave-generated parity fixtures ship as
+  SwiftPM resources and are byte-identical across all six SDKs.
+- Receipt-key attestation binding mode: compact receipts verify fully when
+  the caller supplies the attestation document pinned by `att_sha256`; the
+  live-gateway path is unchanged.
+- `CompanyAffiliation` on `OAuthIdentity` and `UserInfo` (optional,
+  backwards-compatible arrays; exact verified-email-domain match semantics).
+- The User-Agent and beacon identity report the Swift runtime (`swift/6.0`)
+  instead of the host OS or a hard-coded `swift/5.9.0`, derived from one
+  compiler-version cascade; the JWKS fetch and regional health probes now
+  carry the SDK User-Agent.
+- Boundary audit: force unwraps, casts, and tries on decoded JSON, storage,
+  environment, and user input are gone (the two that remain are SDK-owned
+  invariants). OAuth models are explicit `Codable` types that decode only the
+  consumed fields (`key` required; `userId`, `identity`, `data` optional) and
+  retain every unknown producer field in `additionalFields`; `UserInfo.sub`
+  is optional because legacy ownerless keys report a null subject. Response
+  header reads are case-insensitive.
+- Consumer DX: every public declaration carries DocC comments; all README
+  examples compile; `LICENSE` (Apache-2.0) and `package-metadata.json` for
+  Swift Package Registry publishing are added; a library-only release source
+  archive is built in CI.
+- Internal: SwiftLint strict with custom boundary rules, a shared cross-SDK
+  auth wire fixture, and fails-without-fix mutation gates in the macOS CI
+  job.
 
 ## 0.8.0 — 2026-08-22
 
